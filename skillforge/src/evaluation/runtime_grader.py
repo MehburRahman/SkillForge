@@ -9,7 +9,7 @@ def grade_runtime_robustness(verification_result) -> RuntimeGrade:
     completed = (Status.PASS, Status.FAIL)
     successful = sum(result.status in completed for result in executions)
     timeouts = sum(result.status == Status.TIMEOUT for result in executions)
-    runtime_errors = sum(result.status == Status.ERROR for result in executions)
+    runtime_errors = sum(result.status in (Status.ERROR, Status.COMPILE_ERROR) for result in executions)
     nonzero_exits = sum(
         result.status != Status.TIMEOUT and result.exit_code != 0
         for result in executions
@@ -41,4 +41,7 @@ def grade_runtime_robustness(verification_result) -> RuntimeGrade:
         max_duration_seconds=max(durations, default=0.0),
         critical_failure=successful != total,
         failure_evidence=failures,
+        execution_environment=next((r.execution_environment for r in executions if r.execution_environment), {}),
+        compilation_error_count=sum(r.status == Status.COMPILE_ERROR for r in executions),
+        compilation_seconds=sum(r.compilation_seconds for r in executions),
     )

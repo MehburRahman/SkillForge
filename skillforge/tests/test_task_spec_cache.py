@@ -5,6 +5,9 @@ import pytest
 
 import src.agents.task_spec_cache as cache_module
 from src.agents.task_spec_cache import TaskSpecCache
+from src.agents.task_spec import parse_task
+from src.agents.task_spec_cache import task_spec_from_dict
+from tests.test_task_spec import TaskAnalysisClient
 from src.history import ExperimentStore
 from tests.test_experiment_configs import RecordingClient, run_task
 
@@ -40,7 +43,7 @@ def test_cache_analysis_seed_is_independent_of_experiment_seed_and_task_id(tmp_p
     assert clients[0].code_requests[0]["seed"] != clients[1].code_requests[0]["seed"]
 
 
-@pytest.mark.parametrize("change", ["problem", "model", "language", "analyzer"])
+@pytest.mark.parametrize("change", ["problem", "model", "language", "analyzer", "context"])
 def test_cache_invalidates_changed_analysis_inputs(tmp_path, monkeypatch, change):
     cache = TaskSpecCache(tmp_path)
     client = RecordingClient()
@@ -52,6 +55,8 @@ def test_cache_invalidates_changed_analysis_inputs(tmp_path, monkeypatch, change
         client.model = "different-model"
     elif change == "language":
         language = "javascript"
+    elif change == "context":
+        client.generation_options = {"num_ctx": 8192}
     else:
         monkeypatch.setattr(cache_module, "analyzer_fingerprint", lambda: "updated-analyzer")
     _, hit, calls = cache.get_or_analyze(client, problem, language)
@@ -92,3 +97,28 @@ def test_failed_cache_replace_leaves_no_partial_entry(tmp_path, monkeypatch):
     with pytest.raises(OSError, match="disk failure"):
         TaskSpecCache(tmp_path).get_or_analyze(RecordingClient(), "Print ninety-nine.")
     assert list(tmp_path.iterdir()) == []
+
+
+def test_cache_preserves_example_warnings_but_rejects_invented_examples():
+    problem = 'Print the sum of supplied values.'
+    invented = dict(input='2 3', output='5', source_excerpt='Example input: 2 3. Output: 5.')
+    spec = parse_task(TaskAnalysisClient({'examples': [invented]}), problem)
+    data = asdict(spec)
+    assert task_spec_from_dict(data, problem) == spec
+    data['examples'] = [invented]
+    with pytest.raises(ValueError, match='source_excerpt must quote'):
+        task_spec_from_dict(data, problem)
+
+
+@pytest.mark.parametrize('warning', [
+    {'example_index': True, 'reason': 'Invalid index'},
+    {'example_index': 0, 'reason': 'Invalid index'},
+    {'example_index': 1, 'reason': ''},
+    {'example_index': 1, 'reason': 'Discarded', 'example': 'Untrusted data'},
+])
+def test_cache_rejects_malformed_example_warnings(warning):
+    problem = 'Print a value.'
+    data = asdict(parse_task(TaskAnalysisClient({}), problem))
+    data['discarded_inferred_examples'] = [warning]
+    with pytest.raises(ValueError, match='example grounding warnings'):
+        task_spec_from_dict(data, problem)

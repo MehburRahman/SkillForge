@@ -1,4 +1,6 @@
-"""Paired validation and a persisted recommendation; registry wiring is step 2.3."""
+"""Paired validation and a persisted recommendation, applied separately by promotion."""
+
+from src.evolution.scope import validate_evolution_scope
 
 from copy import deepcopy
 import json
@@ -129,6 +131,7 @@ def validate_candidate_prompt(
     # Copy only validation data, so callbacks/caller mutation cannot change an
     # arm midway through the pair. Training and final hidden splits stay unused.
     tasks = tuple(deepcopy(select_benchmark_tasks(dataset, splits=["validation"])))
+    validate_evolution_scope(tasks, store=history_store)
     paired_dataset = BenchmarkDataset(tasks=tasks)
     cache = task_spec_cache if task_spec_cache is not None else TaskSpecCache(
         history_store.path.parent / "task_spec_cache"

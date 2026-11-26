@@ -56,6 +56,7 @@ class TaskBenchmarkResult:
     config_name: str = "full"
     seed: Optional[int] = None
     language: str = "python"
+    reasoning_mode: str = 'direct'
     model_calls: int = 0
     wall_clock_seconds: float = 0.0
     task_spec_cache_hit: bool = False

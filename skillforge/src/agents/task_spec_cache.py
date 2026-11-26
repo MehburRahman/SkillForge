@@ -39,6 +39,16 @@ def task_spec_from_dict(data, problem_statement):
     ):
         raise ValueError("invalid cached TaskSpec grounding warnings")
     spec.discarded_inferred_operations = discarded
+    discarded_examples = data['discarded_inferred_examples']
+    if not isinstance(discarded_examples, list) or any(
+        not isinstance(item, dict)
+        or set(item) != {'example_index', 'reason'}
+        or type(item['example_index']) is not int or item['example_index'] < 1
+        or not isinstance(item['reason'], str) or not item['reason'].strip()
+        for item in discarded_examples
+    ):
+        raise ValueError('invalid cached TaskSpec example grounding warnings')
+    spec.discarded_inferred_examples = discarded_examples
     if asdict(spec) != data:
         raise ValueError("cached TaskSpec is not in validated canonical form")
     return spec
@@ -62,6 +72,12 @@ class TaskSpecCache:
         # analysis for a different execution contract or entry point.
         if mode != "stdio":
             identity.update(execution_mode=mode, entry_point=entry_point)
+        if language == "scala":
+            from src.agents.code_prompts import execution_contract
+            from src.verifier.runners.scala import SCALA_VERSION, SCALA_CLI_VERSION, JDK_VERSION
+            identity["toolchain"] = [SCALA_VERSION, SCALA_CLI_VERSION, JDK_VERSION]
+            identity["execution_contract"] = hashlib.sha256(
+                execution_contract(language, mode, entry_point).encode()).hexdigest()
         return identity
 
     def get_or_analyze(self, client, problem_statement, language="python", *,
@@ -69,6 +85,8 @@ class TaskSpecCache:
         """Return (spec, cache_hit, actual_analysis_calls). Uses a fixed analysis seed."""
         identity = self.identity(problem_statement, getattr(client, "model", "unknown"), language,
                                  execution_mode, entry_point)
+        if getattr(client, 'generation_options', None):
+            identity['model_options'] = dict(client.generation_options)
         key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
         path = self.directory / f"{key}.json"
         try:
@@ -80,7 +98,8 @@ class TaskSpecCache:
 
         analyzer = CallCountingClient(client, seed=ANALYSIS_SEED, task_key=key)
         analyzer.set_stage("cached_analysis")
-        spec = parse_task(analyzer, problem_statement)
+        spec = parse_task(analyzer, problem_statement, language=language,
+                          execution_mode=execution_mode, entry_point=entry_point)
         task_spec_from_dict(asdict(spec), problem_statement)
         self.directory.mkdir(parents=True, exist_ok=True)
         temporary_path = None

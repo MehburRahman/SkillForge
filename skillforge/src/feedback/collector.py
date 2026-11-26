@@ -3,17 +3,15 @@ from typing import List, Optional
 from src.evaluation.models import EvaluationStatus
 from src.evaluation.taxonomy import FailureCategory
 from src.feedback.models import FeedbackBundle, FeedbackSignal, SignalStrength
+from src.feedback.evidence import (
+    MAX_FEEDBACK_VALUE_CHARACTERS,
+    bounded_text as _bounded_text,
+    bounded_diagnostic,
+    compiler_summary,
+)
 
 
-MAX_FEEDBACK_VALUE_CHARACTERS = 500
 VALID_TEST_SOURCES = frozenset({"generated", "trusted"})
-
-
-def _bounded_text(value) -> str:
-    text = str(value)
-    if len(text) <= MAX_FEEDBACK_VALUE_CHARACTERS:
-        return text
-    return text[:MAX_FEEDBACK_VALUE_CHARACTERS] + "...[truncated]"
 
 
 def _functional_category(functional_grade) -> FailureCategory:
@@ -26,6 +24,8 @@ def _functional_category(functional_grade) -> FailureCategory:
 
 def _functional_signal(report) -> Optional[FeedbackSignal]:
     grade = report.functional_grade
+    if report.runtime_grade.compilation_error_count:
+        return None
     if grade.total <= 0:
         return FeedbackSignal(
             category=FailureCategory.UNKNOWN,
@@ -59,7 +59,16 @@ def _runtime_signals(report) -> List[FeedbackSignal]:
             message=f"{grade.timeout_count} execution(s) timed out.",
             evidence={"count": grade.timeout_count},
         ))
-    if grade.runtime_error_count:
+    if grade.compilation_error_count:
+        details = next((compiler_summary(f.get('stderr', '')) for f in grade.failure_evidence
+                        if compiler_summary(f.get('stderr', ''))), '')
+        signals.append(FeedbackSignal(
+            category=FailureCategory.COMPILATION_ERROR,
+            strength=SignalStrength.DETERMINISTIC, source="compiler",
+            message="The candidate did not compile; inspect the compiler diagnostics." + (" " + details if details else ""),
+            evidence={"count": grade.compilation_error_count},
+        ))
+    if grade.runtime_error_count > grade.compilation_error_count:
         signals.append(FeedbackSignal(
             category=FailureCategory.RUNTIME_EXCEPTION,
             strength=SignalStrength.DETERMINISTIC,
@@ -160,6 +169,28 @@ def _candidate_feedback(report, signals, max_evidence_items: int) -> str:
         )
 
     evidence_count = 0
+    seen_runtime = set()
+    # Preserve the crash/compiler cause before examples use the shared budget.
+    # With more than one slot, also reserve an input/output example.
+    runtime_limit = max_evidence_items
+    if report.functional_grade.failure_evidence and max_evidence_items > 1:
+        runtime_limit -= 1
+    for failure in report.runtime_grade.failure_evidence:
+        if evidence_count >= runtime_limit:
+            break
+        diagnostic = bounded_diagnostic(failure.get('stderr', ''))
+        identity = (failure.get('status'), failure.get('exit_code'), diagnostic)
+        if identity in seen_runtime:
+            continue
+        seen_runtime.add(identity)
+        lines.append(
+            "Runtime evidence: "
+            f"status={_bounded_text(failure.get('status', 'unknown'))}, "
+            f"exit_code={failure.get('exit_code')}, "
+            f"stderr={diagnostic!r}."
+        )
+        evidence_count += 1
+
     for failure in report.functional_grade.failure_evidence:
         if evidence_count >= max_evidence_items:
             break
@@ -169,17 +200,6 @@ def _candidate_feedback(report, signals, max_evidence_items: int) -> str:
             f"expected={_bounded_text(failure.get('expected', ''))!r}, "
             f"actual={_bounded_text(failure.get('actual', ''))!r}, "
             f"status={_bounded_text(failure.get('status', 'wrong_output'))}."
-        )
-        evidence_count += 1
-
-    for failure in report.runtime_grade.failure_evidence:
-        if evidence_count >= max_evidence_items:
-            break
-        lines.append(
-            "Runtime evidence: "
-            f"status={_bounded_text(failure.get('status', 'unknown'))}, "
-            f"exit_code={failure.get('exit_code')}, "
-            f"stderr={_bounded_text(failure.get('stderr', ''))!r}."
         )
         evidence_count += 1
     return "\n".join(lines)

@@ -6,6 +6,7 @@ from enum import Enum
 class Language(str, Enum):
     PYTHON = "python"
     JAVASCRIPT = "javascript"
+    SCALA = "scala"
     CPP = "cpp"
     JAVA = "java"
 

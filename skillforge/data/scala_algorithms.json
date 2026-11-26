@@ -1,0 +1,209 @@
+{
+  "schema_version": 1,
+  "tasks": [
+    {
+      "task_id": "scala_shortest_paths_train",
+      "title": "Directed weighted paths",
+      "problem_statement": "Read n m s, then m lines u v w. Vertices are numbered 0 through n-1. Print the minimum total weight from s to each vertex in order, using -1 for unreachable vertices. Edges are directed and parallel edges and zero weights are allowed. 1 <= n <= 200000; 0 <= m <= 300000; 0 <= w <= 1000000000. Use 64-bit distances. Select an efficient algorithm; no particular technique is required.",
+      "category": "graph",
+      "difficulty": "hard",
+      "split": "train",
+      "language": "scala",
+      "execution_mode": "stdio",
+      "visible_tests": [
+        {
+          "input": "4 4 0\n0 1 5\n0 2 2\n2 1 1\n1 3 4\n",
+          "expected_output": "0 3 2 7",
+          "category": "normal"
+        },
+        {
+          "input": "3 0 1\n",
+          "expected_output": "-1 0 -1",
+          "category": "edge"
+        }
+      ],
+      "hidden_tests": [
+        {
+          "input": "5 6 0\n0 1 1000000000\n1 2 1000000000\n2 3 1000000000\n0 1 8\n1 4 0\n4 3 2\n",
+          "expected_output": "0 8 1000000008 10 8",
+          "category": "stress"
+        },
+        {
+          "input": "1 0 0\n",
+          "expected_output": "0",
+          "category": "edge"
+        }
+      ]
+    },
+    {
+      "task_id": "scala_minimum_coins_train",
+      "title": "Unlimited denominations",
+      "problem_statement": "Read n target, followed by n positive coin denominations. Print the minimum number of coins needed to sum exactly to target, or -1 if impossible. Each denomination can be used any number of times. 1 <= n <= 100; 0 <= target <= 100000; coin values are at most 100000. Duplicate denominations are permitted. The task does not require a particular algorithm.",
+      "category": "math",
+      "difficulty": "hard",
+      "split": "train",
+      "language": "scala",
+      "execution_mode": "stdio",
+      "visible_tests": [
+        {
+          "input": "3 6\n1 3 4\n",
+          "expected_output": "2",
+          "category": "normal"
+        },
+        {
+          "input": "2 3\n2 4\n",
+          "expected_output": "-1",
+          "category": "edge"
+        }
+      ],
+      "hidden_tests": [
+        {
+          "input": "3 0\n7 7 9\n",
+          "expected_output": "0",
+          "category": "edge"
+        },
+        {
+          "input": "4 43\n2 7 11 13\n",
+          "expected_output": "5",
+          "category": "stress"
+        }
+      ]
+    },
+    {
+      "task_id": "scala_weighted_intervals_validation",
+      "title": "Profitable intervals",
+      "problem_statement": "Read n, then n lines start end profit describing half-open time intervals [start,end). Select mutually nonoverlapping intervals with maximum total profit. Print that profit. Adjacent intervals may both be selected; choosing none is allowed. 0 <= n <= 200000; 0 <= start < end <= 1000000000; 0 <= profit <= 1000000000. Use 64-bit totals. No algorithm is prescribed.",
+      "category": "other",
+      "difficulty": "hard",
+      "split": "validation",
+      "language": "scala",
+      "execution_mode": "stdio",
+      "visible_tests": [
+        {
+          "input": "4\n0 3 5\n1 2 6\n2 4 7\n3 5 4\n",
+          "expected_output": "13",
+          "category": "normal"
+        },
+        {
+          "input": "0\n",
+          "expected_output": "0",
+          "category": "edge"
+        }
+      ],
+      "hidden_tests": [
+        {
+          "input": "5\n0 1 1000000000\n1 2 1000000000\n2 3 1000000000\n0 3 2\n3 4 1000000000\n",
+          "expected_output": "4000000000",
+          "category": "stress"
+        },
+        {
+          "input": "3\n2 6 7\n2 6 10\n1 7 9\n",
+          "expected_output": "10",
+          "category": "edge"
+        }
+      ]
+    },
+    {
+      "task_id": "scala_maximum_rectangle_validation",
+      "title": "Maximum rectangle sum",
+      "problem_statement": "Read rows columns, followed by a rectangular integer matrix. Print the largest sum of any nonempty rectangle of consecutive rows and columns. 1 <= rows, columns <= 200; values lie between -1000000000 and 1000000000. Use a 64-bit sum. All-negative matrices must select at least one cell. Choose the algorithm yourself.",
+      "category": "array",
+      "difficulty": "hard",
+      "split": "validation",
+      "language": "scala",
+      "execution_mode": "stdio",
+      "visible_tests": [
+        {
+          "input": "2 3\n1 -2 3\n4 -1 2\n",
+          "expected_output": "7",
+          "category": "normal"
+        },
+        {
+          "input": "2 2\n-5 -2\n-3 -7\n",
+          "expected_output": "-2",
+          "category": "edge"
+        }
+      ],
+      "hidden_tests": [
+        {
+          "input": "2 3\n1000000000 1000000000 1000000000\n1000000000 1000000000 1000000000\n",
+          "expected_output": "6000000000",
+          "category": "stress"
+        },
+        {
+          "input": "3 3\n-1 4 -2\n3 -2 5\n-9 2 3\n",
+          "expected_output": "10",
+          "category": "normal"
+        }
+      ]
+    },
+    {
+      "task_id": "scala_dag_paths_hidden",
+      "title": "Paths in an acyclic graph",
+      "problem_statement": "Read n m followed by m directed edges u v with vertices 0 through n-1. The graph is acyclic. Print the number of distinct paths from vertex 0 to vertex n-1, modulo 1000000007. Parallel edges represent distinct choices. With n=1 the empty path counts once. 1 <= n <= 200000; m <= 300000. Vertex labels need not be in topological order. No specific algorithm is required.",
+      "category": "graph",
+      "difficulty": "hard",
+      "split": "hidden",
+      "language": "scala",
+      "execution_mode": "stdio",
+      "visible_tests": [
+        {
+          "input": "4 4\n0 1\n0 2\n1 3\n2 3\n",
+          "expected_output": "2",
+          "category": "normal"
+        },
+        {
+          "input": "3 0\n",
+          "expected_output": "0",
+          "category": "edge"
+        }
+      ],
+      "hidden_tests": [
+        {
+          "input": "5 6\n0 3\n3 1\n1 4\n0 2\n2 1\n0 3\n",
+          "expected_output": "3",
+          "category": "normal"
+        },
+        {
+          "input": "1 0\n",
+          "expected_output": "1",
+          "category": "edge"
+        }
+      ]
+    },
+    {
+      "task_id": "scala_range_updates_hidden",
+      "title": "Inclusive range additions",
+      "problem_statement": "Read n q, followed by q lines left right delta. Begin with n zeros and add delta to each index in the inclusive range [left,right] for every operation. Print the final n values separated by spaces. Indices start at zero; 1 <= n <= 200000; 0 <= q <= 200000; -1000000000 <= delta <= 1000000000. Use 64-bit results. Any efficient technique is allowed.",
+      "category": "array",
+      "difficulty": "hard",
+      "split": "hidden",
+      "language": "scala",
+      "execution_mode": "stdio",
+      "visible_tests": [
+        {
+          "input": "5 3\n0 2 3\n1 4 -1\n3 3 7\n",
+          "expected_output": "3 2 2 6 -1",
+          "category": "normal"
+        },
+        {
+          "input": "2 0\n",
+          "expected_output": "0 0",
+          "category": "edge"
+        }
+      ],
+      "hidden_tests": [
+        {
+          "input": "1 3\n0 0 1000000000\n0 0 1000000000\n0 0 1000000000\n",
+          "expected_output": "3000000000",
+          "category": "stress"
+        },
+        {
+          "input": "6 4\n0 5 2\n1 4 -4\n2 3 8\n5 5 -3\n",
+          "expected_output": "2 -2 6 6 -2 -1",
+          "category": "normal"
+        }
+      ]
+    }
+  ]
+}

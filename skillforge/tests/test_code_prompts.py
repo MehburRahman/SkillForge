@@ -89,6 +89,44 @@ def test_custom_strategy_is_preserved_and_subordinate_to_contract(tmp_path):
     assert registry.path.read_bytes() == original
 
 
+def test_original_input_contract_survives_conflicting_model_analysis_in_all_candidate_prompts():
+    original = 'Read n target, followed by n coin denominations.'
+    spec = TaskSpec(original, 'math', 'Positive coin denominations', input_format='n then coins',
+                    examples=[{'input': {'n': 3, 'coins': [1, 2, 5]}, 'output': 2}])
+    client = RecordingClient(('candidate', 'full repair', 'scalar repair'))
+    candidate = generate_code(client, spec, language='scala')
+    for mode in ('full', 'scalar_repair'):
+        result = SimpleNamespace(passed=0, total=1, pass_rate=0, failures=[{'input': '3 6\n1 3 4'}])
+        refine_code(client, spec, candidate, result, feedback_mode=mode, language='scala')
+    for request in client.requests:
+        prompt = request['prompt']
+        assert original in prompt
+        assert 'original problem above and the execution contract are authoritative' in prompt
+        assert 'fallible model suggestions' in prompt
+        assert 'resolve conflicts and omissions using the original problem' in prompt
+
+
+@pytest.mark.parametrize('source_edits', [False, True])
+def test_compiler_repairs_preserve_the_model_selected_io_formats(source_edits):
+    spec = TaskSpec('Process the supplied values.', 'array', '',
+                    input_format='A JSON array of integers', output_format='A JSON integer',
+                    discarded_inferred_examples=[{'example_index': 1, 'reason': 'Discarded example'}])
+    candidate = CodeCandidate('object Main { invalid }', 'array')
+    response = json.dumps(dict(diagnosis='Replace the invalid statement.',
+                               edits=[dict(old='invalid', new='def main(args: Array[String]): Unit = ()')]))
+    client = RecordingClient([response if source_edits else 'repaired'])
+    verification = SimpleNamespace(passed=0, total=1, failures=[
+        dict(status='compile_error', stderr='-- [E006] Not Found Error: invalid'),
+    ])
+    repaired = refine_code(client, spec, candidate, verification, language='scala',
+                           prefer_source_edits=source_edits)
+    assert repaired.repair_validation_error is None
+    prompt = client.requests[0]['prompt']
+    assert spec.input_format in prompt and spec.output_format in prompt
+    assert 'original problem above and the execution contract are authoritative' in prompt
+    assert 'Discarded example' not in prompt
+
+
 @pytest.mark.parametrize("options", [
     {"language": "cpp"}, {"language": "java"}, {"language": "rust"},
     {"execution_mode": "function"}, {"execution_mode": "stdio", "entry_point": "solve"},

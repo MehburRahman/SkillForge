@@ -167,7 +167,7 @@ def test_retries_after_invalid_response_with_validation_error():
     assert len(client.requests) == 2
     assert "must be between 0 and 1" in client.requests[1]["prompt"]
     assert "UNTRUSTED_PREVIOUS_RESPONSE" in client.requests[1]["prompt"]
-    assert '"problem_understanding": 0.0' in client.requests[1]["prompt"]
+    assert 'Concise semantic assessment.' not in client.requests[1]['prompt']
 
 
 def test_default_limit_accepts_a_valid_third_judge_response():

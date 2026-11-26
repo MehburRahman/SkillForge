@@ -3,6 +3,7 @@ import json
 import pytest
 
 from src.agents.task_spec import TaskSpec
+from src.agents.test_review import test_review_schema as review_schema
 from src.agents.test_generator import (
     TEST_SUITE_RESPONSE_SCHEMA,
     generate_tests,
@@ -15,11 +16,24 @@ class ResponseClient:
         self.responses = iter(responses)
         self.calls = 0
         self.prompts = []
+        self.last_cases = None
 
     def generate(self, prompt, system=None, temperature=0.2):
         self.calls += 1
         self.prompts.append(prompt)
-        return next(self.responses)
+        if "review generated programming tests" in (system or ""):
+            return json.dumps([
+                dict(test_number=i, input_valid=True, output_verified=True,
+                     expected_output=case['expected_output'], category_valid=True,
+                     reason='Fixture review of the input and answer.')
+                for i, case in enumerate(self.last_cases, 1)
+            ])
+        response = next(self.responses)
+        try:
+            self.last_cases = json.loads(response)
+        except ValueError:
+            pass
+        return response
 
 
 class StructuredResponseClient:
@@ -27,6 +41,7 @@ class StructuredResponseClient:
         self.response = response
         self.calls = 0
         self.schema = None
+        self.schemas = []
 
     def generate_json(
         self,
@@ -37,6 +52,14 @@ class StructuredResponseClient:
     ):
         self.calls += 1
         self.schema = schema
+        self.schemas.append(schema)
+        if schema == review_schema(len(json.loads(self.response))):
+            return json.dumps([
+                dict(test_number=i, input_valid=True, output_verified=True,
+                     expected_output=case['expected_output'], category_valid=True,
+                     reason='Fixture review of the input and answer.')
+                for i, case in enumerate(json.loads(self.response), 1)
+            ])
         return self.response
 
 
@@ -60,7 +83,7 @@ def test_retries_after_invalid_tests():
 
     suite = generate_tests(client, addition_spec())
 
-    assert client.calls == 2
+    assert client.calls == 3
     assert suite.cases[0].input == "2 3"
     assert "previous test response was rejected" in client.prompts[1].lower()
 
@@ -77,8 +100,8 @@ def test_uses_native_json_schema_for_generated_tests():
 
     suite = generate_tests(client, addition_spec())
 
-    assert client.calls == 1
-    assert client.schema == TEST_SUITE_RESPONSE_SCHEMA
+    assert client.calls == 2
+    assert client.schemas == [TEST_SUITE_RESPONSE_SCHEMA, review_schema(1)]
     assert suite.cases[0].expected_output == "5"
 
 

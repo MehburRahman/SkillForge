@@ -1,14 +1,17 @@
 import argparse
 
 from src.agents.llm_client import DEFAULT_JUDGE_MODEL, DEFAULT_MODEL, build_clients
-from src.agents.test_generator import load_test_suite, validate_generation_tests
+from src.agents.test_generator import load_test_suite, validate_generation_tests, reference_cases
 from src.agents.task_spec_cache import TaskSpecCache, add_cache_arguments
 from src.benchmark.loader import DEFAULT_PROBLEM_CATALOG_PATH, load_benchmark, select_task
 from src.experiments import (
     add_experiment_arguments, add_execution_arguments, validate_experiment,
+    add_reasoning_arguments,
     validate_generation_execution,
 )
 from src.history import DEFAULT_HISTORY_PATH, ExperimentStore
+from src.evolution.prompt_registry import PromptRegistry
+from src.experiments import preflight_execution
 from src.reinforcement_loop import AttemptResult, run_candidate_refinement_loop
 
 
@@ -64,7 +67,8 @@ def print_attempt(attempt: AttemptResult) -> None:
 
 def print_task_spec_warnings(task_spec) -> None:
     discarded_operations = task_spec.discarded_inferred_operations
-    if not discarded_operations:
+    discarded_examples = getattr(task_spec, 'discarded_inferred_examples', [])
+    if not discarded_operations and not discarded_examples:
         return
 
     print("\nTaskSpec grounding warnings:")
@@ -73,6 +77,8 @@ def print_task_spec_warnings(task_spec) -> None:
             f"  Ignored inferred {discarded['field']}: "
             f"{discarded['value']!r} ({discarded['reason']})."
         )
+    for discarded in discarded_examples:
+        print(f"  Ignored inferred example {discarded['example_index']}: {discarded['reason']}.")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -100,8 +106,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--tests",
         metavar="JSON_FILE",
-        help="Use manually verified JSON tests with an explicit ad hoc problem statement.",
+        help="Use official or otherwise trusted JSON tests with an ad hoc problem; bypasses all test-model calls.",
     )
+    parser.add_argument('--reference-tests', metavar='JSON_FILE',
+                        help='Independently verified stdio cases for checking generated references; keeps generated candidate tests.')
     parser.add_argument(
         "--max-consecutive-repeats",
         type=int,
@@ -112,6 +120,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--prompt-id",
         help="Evaluate a specific registered prompt instead of the active prompt.",
     )
+    parser.add_argument("--prompt-registry", help="Separate prompt registry for this language/execution workspace.")
     parser.add_argument(
         "--model",
         default=DEFAULT_MODEL,
@@ -123,12 +132,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run the advisory semantic judge for every evaluated candidate.",
     )
     parser.add_argument(
+        "--test-model",
+        help="Installed Ollama model for test generation, review and references. Defaults to --model; ignored with trusted tests.",
+    )
+    parser.add_argument('--test-generation-method', choices=('program', 'json'), default='program',
+                        help='Construct tests with a bounded Python builder (default), or generate literal JSON.')
+    parser.add_argument('--differential-cases', type=int, default=0,
+                        help='Add up to 1000 seeded small-input reference checks to generated program tests.')
+    parser.add_argument(
         "--judge-model",
         default=None,
         help=(
-            "Ollama model for the advisory judge, which must come from a "
-            "different family than --model so it is not grading its own "
-            f"output. Implies --llm-judge (default when judging: {DEFAULT_JUDGE_MODEL})."
+            "Ollama model for advisory review; same-model opinions are correlated. "
+            f"Implies --llm-judge (default when judging: {DEFAULT_JUDGE_MODEL})."
         ),
     )
     parser.add_argument(
@@ -165,6 +181,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="History split for an ad hoc problem (default: adhoc); catalog tasks use their stored split.",
     )
     add_experiment_arguments(parser)
+    add_reasoning_arguments(parser)
     add_execution_arguments(parser)
     add_cache_arguments(parser)
     return parser
@@ -172,6 +189,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def resolve_task(args):
     """Resolve one source of task data before opening history or creating clients."""
+    args.reference_suite = None
+    if args.reference_tests and (args.problem is None or args.tests or args.execution_mode not in (None, 'stdio')):
+        raise ValueError('--reference-tests requires an ad hoc stdio task without --tests')
     if args.problem is not None:
         if args.task_id is not None or args.catalog is not None:
             raise ValueError("an ad hoc problem cannot be combined with --task-id or --catalog")
@@ -182,6 +202,8 @@ def resolve_task(args):
         validate_experiment(args.config, args.seed, args.language)
         validate_generation_execution(args.language, args.execution_mode, args.entry_point)
         suite = load_test_suite(args.tests, execution_mode=args.execution_mode) if args.tests else None
+        if args.reference_tests:
+            args.reference_suite = reference_cases(None, load_test_suite(args.reference_tests))
         return args.problem, suite, args.history_task_id, args.benchmark_split or "adhoc"
 
     if args.tests is not None or args.history_task_id is not None or args.benchmark_split is not None:
@@ -219,11 +241,18 @@ def main() -> None:
         mode, language = validate_experiment(args.config, args.seed, args.language)
         validate_generation_execution(language, args.execution_mode, args.entry_point)
         validate_generation_tests(trusted_suite, args.execution_mode)
+        preflight_execution(language, args.execution_mode)
+        registry_options = {"prompt_registry": PromptRegistry(args.prompt_registry)} if args.prompt_registry else {}
         client, judge_client = build_clients(
             model=args.model,
             judge_model=args.judge_model,
             llm_judge=args.llm_judge,
+            context_window=args.context_window,
         )
+        test_client = None
+        if trusted_suite is None and args.test_model and args.test_model != args.model:
+            from src.agents.llm_client import LLMClient
+            test_client = LLMClient(args.test_model, context_window=args.context_window)
         if not args.no_history:
             history_store = ExperimentStore(args.history_db)
         source = "trusted" if trusted_suite else "generated"
@@ -232,8 +261,10 @@ def main() -> None:
             print("Using visible tests; run run_benchmark.py for hidden-test evaluation.")
         print(f"Preparing one fixed {source} test suite and an initial solution...")
         print("Generator model:", client.model)
+        print("Test generation model:", (args.test_model or client.model) if trusted_suite is None else "bypassed (trusted tests)")
         print("Judge model:", judge_client.model if judge_client else "disabled")
         print("Configuration:", mode)
+        print("Reasoning mode:", args.reasoning_mode)
         print("Language:", language)
         print("Execution mode:", args.execution_mode)
         print("Seed:", args.seed if args.seed is not None else "unseeded")
@@ -246,20 +277,26 @@ def main() -> None:
             trusted_test_suite=trusted_suite,
             prompt_id=args.prompt_id,
             judge_client=judge_client,
+            test_client=test_client,
+            test_generation_method=args.test_generation_method,
+            differential_cases=args.differential_cases,
+            reference_test_suite=args.reference_suite,
             history_store=history_store,
             task_id=task_id,
             benchmark_split=benchmark_split,
             config_name=args.config,
+            reasoning_mode=args.reasoning_mode,
             seed=args.seed,
             language=language,
             execution_mode=args.execution_mode,
             entry_point=args.entry_point,
+            **registry_options,
             task_spec_cache=(
                 TaskSpecCache(args.task_spec_cache_dir)
                 if args.task_spec_cache_dir and not args.no_task_spec_cache else None
             ),
         )
-    except ValueError as exc:
+    except (ValueError, RuntimeError, OSError) as exc:
         parser.exit(1, f"\nERROR: {exc}\n")
     finally:
         if history_store is not None:
@@ -270,6 +307,8 @@ def main() -> None:
     print(f"\n{'=' * 60}")
     if result.success:
         final_status = "SUCCESS"
+    elif result.validation_error:
+        final_status = "UNVERIFIED DRAFT"
     elif result.stop_reason == "repeated_candidate":
         final_status = "STOPPED - MODEL REPEATED AN EARLIER SOLUTION"
     elif result.stop_reason == "review_required":
@@ -280,6 +319,8 @@ def main() -> None:
     print("FINAL RESULT:", final_status)
     print("Test source:", result.test_source)
     print("Stop reason:", result.stop_reason)
+    if result.validation_error:
+        print("Validation:", result.validation_error)
     print("Attempt budget:", result.attempt_budget)
     print("Budget source:", result.attempt_budget_source)
     print("Budget reason:", result.attempt_budget_reason)
@@ -287,15 +328,15 @@ def main() -> None:
         print("History run ID:", result.history_run_id)
     print("Model calls:", result.model_calls)
     print(f"Wall clock seconds: {result.wall_clock_seconds:.1f}")
-    print("Best attempt:", result.best_attempt_number)
-    print(f"Best reward: {result.best_reward:.2f}")
     if result.best_attempt:
+        print("Best attempt:", result.best_attempt_number)
+        print(f"Best reward: {result.best_reward:.2f}")
         print("Prompt version:", result.best_attempt.candidate.prompt_version)
         print(
             "Evaluation status:",
             result.best_attempt.evaluation_report.status.value.upper(),
         )
-    print("\nBest code:")
+    print("\nUnverified draft:" if result.validation_error else "\nBest code:")
     print(result.best_code)
 
 

@@ -110,6 +110,35 @@ def test_registers_candidate_from_new_training_context_without_activation(tmp_pa
     assert "SECRET_TEST_INPUT" not in client.requests[0]["prompt"]
 
 
+@pytest.mark.parametrize('mode', ['stdio', 'function', 'http'])
+def test_scala_training_evidence_produces_scala_candidates(tmp_path, mode):
+    prompts = registry(tmp_path)
+    class ScalaMeta(MetaClient):
+        def generate(self, *args, **kwargs):
+            return super().generate(*args, **kwargs).replace('Python', 'Scala')
+    client = ScalaMeta()
+    with ExperimentStore(tmp_path / 'history.db') as store:
+        add_runs(store)
+        with store._connection:
+            store._connection.execute('UPDATE runs SET language=?, execution_mode=?', ('scala', mode))
+        result = propose_candidate_prompt(client, prompts, store, language='scala', execution_mode=mode)
+        assert result.prompt_version.status == 'candidate'
+        assert 'Scala' in result.prompt_version.prompt_text
+        assert f'Execution mode: {mode}' in client.requests[0]['prompt']
+        assert 'SECRET_TEST_INPUT' not in client.requests[0]['prompt']
+
+
+def test_mixed_training_scopes_cannot_reserve_a_proposal(tmp_path):
+    with ExperimentStore(tmp_path / 'history.db') as store:
+        add_runs(store)
+        with store._connection:
+            store._connection.execute("UPDATE runs SET language='scala' WHERE run_id=(SELECT run_id FROM runs LIMIT 1)")
+        client = MetaClient()
+        with pytest.raises(ValueError, match='separate --history-db'):
+            propose_candidate_prompt(client, registry(tmp_path), store)
+        assert client.requests == [] and store.evolution_checks() == []
+
+
 def test_blocks_without_training_evidence_and_records_reason(tmp_path):
     client = MetaClient()
     with ExperimentStore(tmp_path / "history.db") as history:

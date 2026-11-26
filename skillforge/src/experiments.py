@@ -8,9 +8,21 @@ from src.benchmark.language import Language
 
 
 CONFIG_NAMES = ("single_shot", "best_of_n", "scalar_repair", "full", "retrieval")
+REASONING_MODES = ("direct", "plan_critique")
 LANGUAGES = tuple(language.value for language in Language)
 DEFAULT_EXPERIMENT_ATTEMPTS = 3
 SEED_POLICY = "sha256-v1"
+
+
+def validate_reasoning_mode(mode):
+    if mode not in REASONING_MODES:
+        raise ValueError(f"reasoning_mode must be one of: {', '.join(REASONING_MODES)}")
+    return mode
+
+
+def add_reasoning_arguments(parser):
+    parser.add_argument('--reasoning-mode', choices=REASONING_MODES, default='direct',
+                        help='Plan and review the algorithm before coding; adds counted model calls.')
 
 
 def validate_seed(seed):
@@ -33,7 +45,7 @@ def validate_experiment(config_name=None, seed=None, language=None):
         raise ValueError(f"language must be one of: {', '.join(LANGUAGES)}")
     if config_name == "retrieval":
         raise ValueError("retrieval is not implemented yet (project plan task 3.2)")
-    if language not in ("python", "javascript"):
+    if language not in ("python", "javascript", "scala"):
         raise ValueError(
             f"{language} execution is not implemented yet "
             "(C++/Java runners: project plan task 3.4)."
@@ -57,6 +69,8 @@ def request_seed(base_seed, task_key, stage, call_index):
 
 
 def add_experiment_arguments(parser):
+    parser.add_argument('--context-window', type=int, default=8192,
+                        help='Explicit Ollama context window in tokens (1024–32768).')
     parser.add_argument(
         "--config", choices=CONFIG_NAMES,
         help=("Experiment arm: fixed three-candidate budget unless --max-attempts "
@@ -77,3 +91,10 @@ def add_execution_arguments(parser):
     parser.add_argument("--execution-mode", choices=[mode.value for mode in ExecutionMode],
                         help="Ad hoc execution contract (default: stdio); catalog tasks declare their own.")
     parser.add_argument("--entry-point", help="Function name for function-mode tasks.")
+
+
+def preflight_execution(language, execution_mode="stdio"):
+    if language == "scala":
+        from src.verifier.runners.scala import preflight
+        return preflight(execution_mode)
+    return None

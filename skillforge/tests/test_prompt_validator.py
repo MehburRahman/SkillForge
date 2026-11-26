@@ -11,6 +11,7 @@ from src.benchmark.models import BenchmarkDataset
 from src.evolution.models import PromptValidationResult
 from src.evolution.validator import _binary_outcomes, validate_candidate_prompt
 from src.history import ExperimentStore, ExperimentStoreError
+from src.history.experiment_store import SCHEMA_VERSION
 from tests.test_benchmark_runner import BenchmarkClient, make_registry, write_dataset
 from tests.test_llm_judge import valid_response
 from tests.test_benchmark_loader import write_benchmark
@@ -95,8 +96,8 @@ def test_real_runner_pairs_tasks_seeds_budgets_and_records_recommendation(tmp_pa
     assert {r.attempt_budget for r in completed} == {2}  # analyzer suggests 4
     assert {r.attempt_budget_source for r in completed} == {"manual_override"}
     assert all(r.analysis_model_calls == 0 for r in completed if r.prompt_version == "P1")
-    baseline_requests = [r for r in client.requests if "ACTIVE SYSTEM PROMPT" in r["system"]]
-    candidate_requests = [r for r in client.requests if "CANDIDATE SYSTEM PROMPT" in r["system"]]
+    baseline_requests = [r for r in client.requests if "ACTIVE SYSTEM PROMPT" in r["system"] and "You repair" not in r["system"]]
+    candidate_requests = [r for r in client.requests if "CANDIDATE SYSTEM PROMPT" in r["system"] and "You repair" not in r["system"]]
     assert [r["seed"] for r in baseline_requests] == [r["seed"] for r in candidate_requests]
     assert len(set(r["seed"] for r in baseline_requests)) == 4
     text = "\n".join(r["prompt"] for r in client.requests)
@@ -357,7 +358,7 @@ def test_v7_migration_preserves_existing_history(tmp_path):
     with ExperimentStore(path) as store:
         assert store.benchmark_task(sweep, "v1")["result_json"] is None
         assert store.get_prompt_validation("missing") is None
-        assert store._connection.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()[0] == "8"
+        assert store._connection.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()[0] == str(SCHEMA_VERSION)
 
 
 def outcome_row(**changes):

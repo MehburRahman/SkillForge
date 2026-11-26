@@ -65,6 +65,14 @@ def test_prints_discarded_inferred_operation_warning(capsys):
     assert "Ignored inferred required_operations: 'stack'" in output
 
 
+def test_prints_example_warnings_without_reintroducing_discarded_values(capsys):
+    task_spec = SimpleNamespace(discarded_inferred_operations=[], discarded_inferred_examples=[
+        {'example_index': 1, 'reason': 'source_excerpt is absent from the original statement'},
+    ])
+    print_task_spec_warnings(task_spec)
+    assert 'Ignored inferred example 1' in capsys.readouterr().out
+
+
 def _fake_result():
     return SimpleNamespace(
         task_spec=SimpleNamespace(discarded_inferred_operations=[]),
@@ -81,6 +89,7 @@ def _fake_result():
         best_reward=1.0,
         best_attempt=None,
         best_code="print('YES')",
+        validation_error=None,
     )
 
 
@@ -97,6 +106,19 @@ def _run_main(monkeypatch, argv):
     return captured
 
 
+def test_cli_displays_unverified_code_without_assigning_a_reward(monkeypatch, capsys):
+    result = _fake_result()
+    result.success = False
+    result.stop_reason = 'test_validation_failed'
+    result.validation_error = 'Test model unavailable'
+    monkeypatch.setattr(run_reinforcement, 'run_candidate_refinement_loop', lambda **kwargs: result)
+    monkeypatch.setattr(sys, 'argv', ['run_reinforcement.py', '--no-history', 'Process input.'])
+    run_reinforcement.main()
+    output = capsys.readouterr().out
+    assert 'UNVERIFIED DRAFT' in output and 'Unverified draft:\n' + result.best_code in output
+    assert 'Test model unavailable' in output and 'Best reward:' not in output
+
+
 def test_judge_runs_a_different_model_than_the_generator(monkeypatch):
     captured = _run_main(monkeypatch, ["--llm-judge"])
 
@@ -111,6 +133,28 @@ def test_judge_stays_off_without_a_judge_flag(monkeypatch):
     captured = _run_main(monkeypatch, [])
 
     assert captured["judge_client"] is None
+
+
+def test_ad_hoc_cli_routes_generated_tests_to_the_explicit_test_model(monkeypatch):
+    captured = _run_main(monkeypatch, ['Read integers and print their sum.',
+                                     '--test-model', 'reference-model:large'])
+    assert captured['client'].model == DEFAULT_MODEL
+    assert captured['test_client'].model == 'reference-model:large'
+    assert captured['test_client'].generation_options == {'num_ctx': 8192}
+    assert captured['test_generation_method'] == 'program'
+
+
+def test_catalog_cli_bypasses_the_test_model(monkeypatch):
+    captured = _run_main(monkeypatch, ['--test-model', 'unused-model'])
+    assert captured['trusted_test_suite'] is not None
+    assert captured['test_client'] is None
+
+
+def test_custom_workspace_registry_is_forwarded(monkeypatch, tmp_path):
+    from tests.test_prompt_evolver import registry
+    prompts = registry(tmp_path)
+    captured = _run_main(monkeypatch, ['--prompt-registry', str(prompts.path)])
+    assert captured['prompt_registry'].path == prompts.path
     assert captured["client"].model == DEFAULT_MODEL
 
 
@@ -138,7 +182,6 @@ def test_experiment_flags_reach_loop(monkeypatch):
 
 @pytest.mark.parametrize("flags", [
     ["--config", "retrieval"], ["--language", "java"], ["--seed", "-1"],
-    ["--model", "qwen2.5-coder:7b", "--judge-model", "qwen2.5:3b"],
 ])
 def test_unsupported_options_fail_before_creating_history(monkeypatch, tmp_path, flags):
     path = tmp_path / "unused.db"

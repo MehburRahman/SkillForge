@@ -1,0 +1,7 @@
+**
+!src/
+!src/**
+!tools/
+!tools/scala-http.Dockerfile
+**/__pycache__/
+**/*.pyc

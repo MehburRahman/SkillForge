@@ -29,11 +29,21 @@ __all__ = [
     "PairedComparison",
     "PromptValidationResult",
     "ValidationTaskOutcome",
+    "apply_validation",
+    "check_rollbacks",
+    "recover_prompt_actions",
+    "run_evolution_round",
 ]
 
 
 def __getattr__(name):
     """Load the evolver lazily so proposal models remain cycle-free imports."""
+    if name in {"apply_validation", "check_rollbacks", "recover_prompt_actions"}:
+        from src.evolution import promotion
+        return getattr(promotion, name)
+    if name == "run_evolution_round":
+        from src.evolution.workflow import run_evolution_round
+        return run_evolution_round
     if name == "propose_candidate_prompt":
         from src.evolution.prompt_evolver import propose_candidate_prompt
 

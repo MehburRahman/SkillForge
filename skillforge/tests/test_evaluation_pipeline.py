@@ -135,3 +135,15 @@ def test_judge_unavailability_does_not_hide_deterministic_failure():
     assert "JUDGE_UNAVAILABLE" in [
         reason.code for reason in report.review_reasons
     ]
+
+
+def test_interactive_judge_scope_skips_failing_candidates_but_judges_passing_ones():
+    client = JudgeClient(judge_response())
+    report, _ = evaluate_candidate(spec(), "print(0)", verify("print(0)", suite()),
+                                   test_source="trusted", judge_client=client, judge_only_passing=True)
+    assert client.calls == 0 and report.status == EvaluationStatus.FAIL
+    assert "JUDGE_UNAVAILABLE" not in [reason.code for reason in report.review_reasons]
+    passing = "value = int(input())\nprint(value * 2)"
+    evaluate_candidate(spec(), passing, verify(passing, suite()), test_source="trusted",
+                       judge_client=client, judge_only_passing=True)
+    assert client.calls == 1

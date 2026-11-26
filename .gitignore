@@ -4,7 +4,15 @@ __pycache__/
 .env
 .DS_Store
 .pytest_cache/
+node_modules/
+skillforge/frontend/dist/
+skillforge/frontend/coverage/
+skillforge/frontend/test-results/
+skillforge/frontend/real-test-results/
+skillforge/frontend/playwright-report/
+*.tsbuildinfo
 skillforge/data/*.sqlite3*
+skillforge/data/*.lock
 skillforge/data/task_spec_cache/
 skillforge/data/mbpp_conversion_cache/
 *.pptx
@@ -12,3 +20,14 @@ skillforge/data/mbpp_conversion_cache/
 *.pdf
 *.md
 !README.md
+
+# Scala build products and local execution state
+.scala-build/
+.bsp/
+*.class
+*.jar
+skillforge/data/scala_toolchain_ready.json
+skillforge/data/**/*.sqlite3*
+skillforge/data/**/task_spec_cache/
+skillforge/data/workspaces/
+skillforge/data/reasoning-comparisons/

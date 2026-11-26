@@ -6,6 +6,7 @@ import pytest
 from src.evolution import check_evolution_trigger, recover_evolution_attempt
 from src.evolution.prompt_registry import PromptRegistry
 from src.history import ExperimentStore, ExperimentStoreError
+from src.history.experiment_store import SCHEMA_VERSION
 from tests.test_prompt_evolver import add_runs, registry
 
 
@@ -154,7 +155,7 @@ def test_v6_migration_preserves_history_and_adds_trigger_tables(tmp_path):
         assert store.get_run(run_id) == original
         assert store.get_signals(run_id) == signals
         assert store.evolution_checks() == []
-        assert store._connection.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()[0] == "8"
+        assert store._connection.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()[0] == str(SCHEMA_VERSION)
         assert not check_evolution_trigger(store, registry(tmp_path)).eligible
 
 

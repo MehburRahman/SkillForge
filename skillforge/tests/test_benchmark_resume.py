@@ -102,7 +102,7 @@ def test_hidden_interruption_reuses_frozen_code_and_taskspec_without_cache(tmp_p
     assert result.task_results[0].analysis_model_calls == 1
 
 
-@pytest.mark.parametrize("change", ["seed", "budget", "config", "model", "judge", "prompt", "dataset", "selection", "cache"])
+@pytest.mark.parametrize("change", ["seed", "budget", "config", "model", "judge", "prompt", "dataset", "selection", "cache", "context"])
 def test_resume_rejects_changed_settings_before_model_calls(tmp_path, setup, change):
     with ExperimentStore(tmp_path / "history.db") as store:
         run_benchmark(BenchmarkClient(), history_store=store, **setup)
@@ -126,6 +126,8 @@ def test_resume_rejects_changed_settings_before_model_calls(tmp_path, setup, cha
             task.hidden_tests.cases[0].expected_output = "changed"
         elif change == "selection":
             setup["splits"] = ["train"]
+        elif change == "context":
+            client.generation_options = {"num_ctx": 8192}
         else:
             setup["task_spec_cache"] = TaskSpecCache(tmp_path / "cache")
         with pytest.raises(ExperimentStoreError, match="settings or contents have changed"):
@@ -201,7 +203,7 @@ def test_resume_requires_persistence_and_id(setup):
 def test_benchmark_rejects_self_judge_before_creating_sweep(tmp_path, setup):
     client = BenchmarkClient()
     with ExperimentStore(tmp_path / "history.db") as store:
-        with pytest.raises(ValueError, match="different model families"):
+        with pytest.raises(ValueError, match="separate client instances"):
             run_benchmark(client, judge_client=client, history_store=store, **setup)
         assert store._connection.execute("SELECT COUNT(*) FROM benchmark_runs").fetchone()[0] == 0
     assert client.requests == []
