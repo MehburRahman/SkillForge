@@ -50,6 +50,13 @@ def test_judge_stays_off_without_a_judge_flag(monkeypatch):
     assert captured["client"].model == DEFAULT_MODEL
 
 
+def test_custom_workspace_registry_is_forwarded(monkeypatch, tmp_path):
+    from tests.test_prompt_evolver import registry
+    prompts = registry(tmp_path)
+    captured = _run_main(monkeypatch, ['--prompt-registry', str(prompts.path)])
+    assert captured['prompt_registry'].path == prompts.path
+
+
 def test_model_flags_override_both_clients(monkeypatch):
     captured = _run_main(
         monkeypatch,
@@ -74,7 +81,6 @@ def test_experiment_flags_reach_runner(monkeypatch):
 
 @pytest.mark.parametrize("flags", [
     ["--config", "retrieval"], ["--language", "java"], ["--seed", "-1"],
-    ["--model", "qwen2.5-coder:7b", "--judge-model", "qwen2.5:3b"],
 ])
 def test_unsupported_options_fail_before_creating_history(monkeypatch, tmp_path, flags):
     path = tmp_path / "unused.db"

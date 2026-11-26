@@ -25,7 +25,7 @@ class HistoryRepairClient:
                 "attempt_budget_reason": "A repair may be required.",
                 "examples": [],
             })
-        if "competitive programmer" in system.lower():
+        if "competitive programmer" in system.lower() and "repair incorrect" not in system.lower():
             return "print(0)"
         if "repair incorrect" in system.lower():
             return "value = int(input())\nprint(value * 2)"
@@ -184,6 +184,7 @@ def test_persists_unavailable_optional_judge_as_review_reason(tmp_path):
         ("config_name", "ful", "config_name must be one of"),
         ("seed", -1, "seed must be a non-negative integer"),
         ("language", "", "language must be a non-empty string"),
+        ("reasoning_mode", "guess", "reasoning_mode must be one of"),
     ],
 )
 def test_rejects_invalid_run_metadata(tmp_path, keyword, value, message):
@@ -258,12 +259,15 @@ def test_migrates_v1_history_schema_without_removing_existing_runs(tmp_path):
             "SELECT value FROM metadata WHERE key = 'schema_version'"
         ).fetchone()["value"]
 
-    assert schema_version == "6"
+    assert schema_version == "12"
+    assert old_run['test_model'] is None
+    assert old_run['test_model_calls'] == 0
     assert old_run["task_id"] == "old-task"
     assert old_run["attempt_budget"] is None
     assert old_run["attempt_budget_source"] is None
     assert old_run["attempt_budget_reason"] is None
     assert old_run["judge_model"] is None
+    assert old_run["reasoning_mode"] == "direct"
 
 
 def test_training_query_requires_positive_limit(tmp_path):
@@ -287,6 +291,58 @@ def test_records_the_judge_model_separately_from_the_generator(tmp_path):
     assert run["model_name"] == "qwen2.5-coder:7b"
     assert run["judge_model"] == "llama3.1:8b"
     assert run["judge_enabled"] == 1
+
+
+def test_reasoning_mode_survives_history_reopen_and_defaults_to_direct(tmp_path):
+    path = tmp_path / "history.sqlite3"
+    with ExperimentStore(path) as store:
+        direct = store.start_run("Problem", "P0", "model", "trusted", False)
+        planned = store.start_run("Problem", "P0", "model", "trusted", False,
+                                  reasoning_mode="plan_critique")
+    with ExperimentStore(path) as store:
+        assert store.get_run(direct)["reasoning_mode"] == "direct"
+        assert store.get_run(planned)["reasoning_mode"] == "plan_critique"
+
+
+def test_training_reasoning_modes_include_defaults_and_distinct_planned_runs(tmp_path):
+    path = tmp_path / "history.sqlite3"
+    with ExperimentStore(path) as store:
+        assert store.training_reasoning_modes() == []
+        store.start_run("Problem", "P0", "model", "trusted", False,
+                        benchmark_split="train", reasoning_mode="plan_critique")
+        store.start_run("Problem", "P0", "model", "trusted", False,
+                        benchmark_split="train")
+        store.start_run("Problem", "P0", "model", "trusted", False,
+                        benchmark_split="train", reasoning_mode="plan_critique")
+
+    with ExperimentStore(path) as store:
+        assert store.training_reasoning_modes() == ["direct", "plan_critique"]
+
+
+@pytest.mark.parametrize("split", ["adhoc", "validation", "hidden"])
+def test_training_reasoning_modes_ignore_other_splits(tmp_path, split):
+    with ExperimentStore(tmp_path / "history.sqlite3") as store:
+        store.start_run("Training problem", "P0", "model", "trusted", False,
+                        benchmark_split="train")
+        store.start_run("Other problem", "P0", "model", "trusted", False,
+                        benchmark_split=split, reasoning_mode="plan_critique")
+
+        assert store.training_reasoning_modes() == ["direct"]
+
+
+@pytest.mark.parametrize(('split', 'expected'), [('train', ['direct']), ('hidden', [])])
+def test_readonly_legacy_training_reasoning_modes_default_without_migrating(tmp_path, split, expected):
+    path = tmp_path / 'legacy.sqlite3'
+    with ExperimentStore(path) as store:
+        store.start_run('Legacy problem', 'P0', 'model', 'trusted', False, benchmark_split=split)
+    with sqlite3.connect(path) as db:
+        db.execute('ALTER TABLE runs DROP COLUMN reasoning_mode')
+        db.execute("UPDATE metadata SET value = '10' WHERE key = 'schema_version'")
+    before = path.read_bytes()
+
+    with ExperimentStore(path, readonly=True) as store:
+        assert store.training_reasoning_modes() == expected
+    assert path.read_bytes() == before
 
 
 def test_leaves_the_judge_model_empty_when_the_judge_is_off(tmp_path):
@@ -361,10 +417,11 @@ def test_migrates_v2_history_schema_without_removing_existing_runs(tmp_path):
             "SELECT value FROM metadata WHERE key = 'schema_version'"
         ).fetchone()["value"]
 
-    assert schema_version == "6"
+    assert schema_version == "12"
     assert old_run["task_id"] == "old-task"
     assert old_run["attempt_budget"] == 3
     assert new_run["judge_model"] == "llama3.1:8b"
+    assert old_run["reasoning_mode"] == "direct"
     for column in (
         "judge_model",
         "config_name",
@@ -439,6 +496,8 @@ class PassingJudgeClient:
     model = "history-judge-model:1b"
 
     def generate(self, prompt, system=None, temperature=0.0):
+        payload = json.loads(prompt.split('<BEGIN_UNTRUSTED_EVALUATION_DATA>\n')[1].split('\n<END_UNTRUSTED_EVALUATION_DATA>')[0])
+        failed = not payload['deterministic_grades']['functional']['passed_all']
         return json.dumps({
             "problem_understanding": 0.9,
             "algorithm_suitability": 0.9,
@@ -447,8 +506,8 @@ class PassingJudgeClient:
             "code_quality": 0.9,
             "overall_score": 0.9,
             "critical_issues": [],
-            "feedback": "No semantic issue remains.",
-            "likely_failure_category": "NONE",
+            "feedback": "The output is incorrect." if failed else "No semantic issue remains.",
+            "likely_failure_category": "LOGIC_ERROR" if failed else "NONE",
         })
 
 
@@ -537,7 +596,7 @@ def test_migrates_v3_preserving_model_costs_and_adds_resume_tables(tmp_path):
         assert row["benchmark_run_id"] is None
         assert row["analysis_model_calls"] is None
         assert row["task_spec_cache_hit"] is None
-        assert store._connection.execute("SELECT value FROM metadata").fetchone()[0] == "6"
+        assert store._connection.execute("SELECT value FROM metadata").fetchone()[0] == "12"
         assert store._connection.execute("SELECT COUNT(*) FROM benchmark_runs").fetchone()[0] == 0
         assert store._connection.execute("SELECT COUNT(*) FROM benchmark_tasks").fetchone()[0] == 0
 
@@ -559,7 +618,7 @@ def test_migrates_v4_without_changing_existing_runs_or_benchmark_checkpoints(tmp
             """)
     with ExperimentStore(path) as store:
         assert store.get_run(run_id) == original_run
-        assert store._connection.execute("SELECT value FROM metadata").fetchone()[0] == "6"
+        assert store._connection.execute("SELECT value FROM metadata").fetchone()[0] == "12"
         assert store._connection.execute("SELECT checkpoint_json FROM benchmark_tasks").fetchone()[0] == '{"attempt":2}'
         assert store._connection.execute("SELECT COUNT(*) FROM judge_sanity_runs").fetchone()[0] == 0
         assert store._connection.execute("SELECT COUNT(*) FROM judge_sanity_results").fetchone()[0] == 0

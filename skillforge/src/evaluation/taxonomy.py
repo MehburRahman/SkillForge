@@ -2,6 +2,7 @@ from enum import Enum
 
 
 class FailureCategory(str, Enum):
+    COMPILATION_ERROR = "COMPILATION_ERROR"
     LOGIC_ERROR = "LOGIC_ERROR"
     EDGE_CASE = "EDGE_CASE"
     INPUT_PARSING = "INPUT_PARSING"

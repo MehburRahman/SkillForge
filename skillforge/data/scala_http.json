@@ -1,0 +1,491 @@
+{
+  "schema_version": 1,
+  "tasks": [
+    {
+      "task_id": "scala_store_train",
+      "title": "In-memory text store",
+      "problem_statement": "Implement an in-memory HTTP text store, initially empty. Keys match [a-z]+. PUT /items/{key} stores the UTF-8 body verbatim, returning 204 with an empty body. GET /items/{key} returns 200 with its stored body, or 404 with body missing. DELETE /items/{key} returns 204 and removes a present key, otherwise 404 with body missing. Unsupported methods on these routes return 405 with body method; all other paths return 404 with body missing. Requests within a scenario share state. No persistence or external dependencies are needed.",
+      "category": "other",
+      "difficulty": "hard",
+      "split": "train",
+      "language": "scala",
+      "execution_mode": "http",
+      "visible_tests": [
+        {
+          "requests": [
+            {
+              "method": "PUT",
+              "path": "/items/apple",
+              "body": " α\n",
+              "expected_status": 204,
+              "expected_body": ""
+            },
+            {
+              "method": "GET",
+              "path": "/items/apple",
+              "body": "",
+              "expected_status": 200,
+              "expected_body": " α\n"
+            },
+            {
+              "method": "DELETE",
+              "path": "/items/apple",
+              "body": "",
+              "expected_status": 204,
+              "expected_body": ""
+            },
+            {
+              "method": "GET",
+              "path": "/items/apple",
+              "body": "",
+              "expected_status": 404,
+              "expected_body": "missing"
+            }
+          ],
+          "category": "normal"
+        }
+      ],
+      "hidden_tests": [
+        {
+          "requests": [
+            {
+              "method": "GET",
+              "path": "/items/pear",
+              "body": "",
+              "expected_status": 404,
+              "expected_body": "missing"
+            },
+            {
+              "method": "PUT",
+              "path": "/items/pear",
+              "body": "first",
+              "expected_status": 204,
+              "expected_body": ""
+            },
+            {
+              "method": "PUT",
+              "path": "/items/pear",
+              "body": "last",
+              "expected_status": 204,
+              "expected_body": ""
+            },
+            {
+              "method": "GET",
+              "path": "/items/pear",
+              "body": "",
+              "expected_status": 200,
+              "expected_body": "last"
+            },
+            {
+              "method": "POST",
+              "path": "/items/pear",
+              "body": "",
+              "expected_status": 405,
+              "expected_body": "method"
+            }
+          ],
+          "category": "normal"
+        },
+        {
+          "requests": [
+            {
+              "method": "GET",
+              "path": "/unknown",
+              "body": "",
+              "expected_status": 404,
+              "expected_body": "missing"
+            }
+          ],
+          "category": "normal"
+        }
+      ]
+    },
+    {
+      "task_id": "scala_counter_train",
+      "title": "Checked counter service",
+      "problem_statement": "Implement an HTTP counter initially zero. GET /counter returns 200 with its decimal value. POST /counter/add accepts a decimal signed 64-bit integer in the UTF-8 body with optional surrounding whitespace, adds it to the current value, and returns 200 with the new value. Invalid input or signed 64-bit overflow returns 400 with body invalid and leaves state unchanged. DELETE /counter resets to zero and returns 204 with an empty body. All other requests return 404 with body missing. No database is required.",
+      "category": "other",
+      "difficulty": "hard",
+      "split": "train",
+      "language": "scala",
+      "execution_mode": "http",
+      "visible_tests": [
+        {
+          "requests": [
+            {
+              "method": "GET",
+              "path": "/counter",
+              "body": "",
+              "expected_status": 200,
+              "expected_body": "0"
+            },
+            {
+              "method": "POST",
+              "path": "/counter/add",
+              "body": "5",
+              "expected_status": 200,
+              "expected_body": "5"
+            },
+            {
+              "method": "POST",
+              "path": "/counter/add",
+              "body": " -2\n",
+              "expected_status": 200,
+              "expected_body": "3"
+            },
+            {
+              "method": "DELETE",
+              "path": "/counter",
+              "body": "",
+              "expected_status": 204,
+              "expected_body": ""
+            },
+            {
+              "method": "GET",
+              "path": "/counter",
+              "body": "",
+              "expected_status": 200,
+              "expected_body": "0"
+            }
+          ],
+          "category": "normal"
+        }
+      ],
+      "hidden_tests": [
+        {
+          "requests": [
+            {
+              "method": "POST",
+              "path": "/counter/add",
+              "body": "9223372036854775807",
+              "expected_status": 200,
+              "expected_body": "9223372036854775807"
+            },
+            {
+              "method": "POST",
+              "path": "/counter/add",
+              "body": "1",
+              "expected_status": 400,
+              "expected_body": "invalid"
+            },
+            {
+              "method": "GET",
+              "path": "/counter",
+              "body": "",
+              "expected_status": 200,
+              "expected_body": "9223372036854775807"
+            }
+          ],
+          "category": "normal"
+        },
+        {
+          "requests": [
+            {
+              "method": "POST",
+              "path": "/counter/add",
+              "body": "bad",
+              "expected_status": 400,
+              "expected_body": "invalid"
+            },
+            {
+              "method": "GET",
+              "path": "/counter",
+              "body": "",
+              "expected_status": 200,
+              "expected_body": "0"
+            }
+          ],
+          "category": "normal"
+        }
+      ]
+    },
+    {
+      "task_id": "scala_statistics_validation",
+      "title": "Integer statistics API",
+      "problem_statement": "Implement POST /statistics. The body contains 1 to 10000 whitespace-separated signed decimal integers between -1000000000 and 1000000000. Return 200 with body count min max sum, four decimal numbers separated by single spaces, with no final newline. Use a 64-bit sum. Empty or malformed bodies return 400 with body invalid. Other methods at /statistics return 405 with body method; other paths return 404 with body missing. Each request is independent.",
+      "category": "other",
+      "difficulty": "hard",
+      "split": "validation",
+      "language": "scala",
+      "execution_mode": "http",
+      "visible_tests": [
+        {
+          "requests": [
+            {
+              "method": "POST",
+              "path": "/statistics",
+              "body": "3 -1 3 8",
+              "expected_status": 200,
+              "expected_body": "4 -1 8 13"
+            },
+            {
+              "method": "POST",
+              "path": "/statistics",
+              "body": "",
+              "expected_status": 400,
+              "expected_body": "invalid"
+            }
+          ],
+          "category": "normal"
+        }
+      ],
+      "hidden_tests": [
+        {
+          "requests": [
+            {
+              "method": "POST",
+              "path": "/statistics",
+              "body": "1000000000 1000000000 1000000000",
+              "expected_status": 200,
+              "expected_body": "3 1000000000 1000000000 3000000000"
+            },
+            {
+              "method": "POST",
+              "path": "/statistics",
+              "body": "1 x",
+              "expected_status": 400,
+              "expected_body": "invalid"
+            }
+          ],
+          "category": "normal"
+        },
+        {
+          "requests": [
+            {
+              "method": "GET",
+              "path": "/statistics",
+              "body": "",
+              "expected_status": 405,
+              "expected_body": "method"
+            },
+            {
+              "method": "POST",
+              "path": "/else",
+              "body": "4",
+              "expected_status": 404,
+              "expected_body": "missing"
+            }
+          ],
+          "category": "normal"
+        }
+      ]
+    },
+    {
+      "task_id": "scala_http_edits_validation",
+      "title": "Edit distance over HTTP",
+      "problem_statement": "Implement POST /distance. The UTF-8 body consists of two lowercase ASCII strings separated by exactly one newline; either string may be empty. Each length is at most 2000. Return 200 with the decimal minimum number of unit-cost insertions, deletions, and substitutions transforming the first string into the second. Invalid body format returns 400 with body invalid. Other methods at /distance return 405 with body method; other paths return 404 with body missing. No algorithm is prescribed.",
+      "category": "other",
+      "difficulty": "hard",
+      "split": "validation",
+      "language": "scala",
+      "execution_mode": "http",
+      "visible_tests": [
+        {
+          "requests": [
+            {
+              "method": "POST",
+              "path": "/distance",
+              "body": "kitten\nsitting",
+              "expected_status": 200,
+              "expected_body": "3"
+            },
+            {
+              "method": "POST",
+              "path": "/distance",
+              "body": "\nabc",
+              "expected_status": 200,
+              "expected_body": "3"
+            }
+          ],
+          "category": "normal"
+        }
+      ],
+      "hidden_tests": [
+        {
+          "requests": [
+            {
+              "method": "POST",
+              "path": "/distance",
+              "body": "abac\nbaca",
+              "expected_status": 200,
+              "expected_body": "2"
+            },
+            {
+              "method": "POST",
+              "path": "/distance",
+              "body": "\n",
+              "expected_status": 200,
+              "expected_body": "0"
+            },
+            {
+              "method": "POST",
+              "path": "/distance",
+              "body": "a\nb\nc",
+              "expected_status": 400,
+              "expected_body": "invalid"
+            }
+          ],
+          "category": "normal"
+        },
+        {
+          "requests": [
+            {
+              "method": "GET",
+              "path": "/distance",
+              "body": "",
+              "expected_status": 405,
+              "expected_body": "method"
+            }
+          ],
+          "category": "normal"
+        }
+      ]
+    },
+    {
+      "task_id": "scala_queue_hidden",
+      "title": "UTF-8 queue API",
+      "problem_statement": "Implement an in-memory FIFO queue, initially empty. POST /queue appends the UTF-8 body verbatim, including an empty body, and returns 201 with the current queue length. GET /queue removes and returns the oldest body with status 200; an empty queue returns 404 with body empty. DELETE /queue clears it and returns 204 with an empty body. GET /queue/size returns 200 with the decimal queue length. All other requests return 404 with body missing. Requests share state inside each scenario.",
+      "category": "other",
+      "difficulty": "hard",
+      "split": "hidden",
+      "language": "scala",
+      "execution_mode": "http",
+      "visible_tests": [
+        {
+          "requests": [
+            {
+              "method": "POST",
+              "path": "/queue",
+              "body": "first",
+              "expected_status": 201,
+              "expected_body": "1"
+            },
+            {
+              "method": "POST",
+              "path": "/queue",
+              "body": "second",
+              "expected_status": 201,
+              "expected_body": "2"
+            },
+            {
+              "method": "GET",
+              "path": "/queue",
+              "body": "",
+              "expected_status": 200,
+              "expected_body": "first"
+            },
+            {
+              "method": "GET",
+              "path": "/queue/size",
+              "body": "",
+              "expected_status": 200,
+              "expected_body": "1"
+            }
+          ],
+          "category": "normal"
+        }
+      ],
+      "hidden_tests": [
+        {
+          "requests": [
+            {
+              "method": "GET",
+              "path": "/queue",
+              "body": "",
+              "expected_status": 404,
+              "expected_body": "empty"
+            },
+            {
+              "method": "POST",
+              "path": "/queue",
+              "body": "",
+              "expected_status": 201,
+              "expected_body": "1"
+            },
+            {
+              "method": "POST",
+              "path": "/queue",
+              "body": " α\n",
+              "expected_status": 201,
+              "expected_body": "2"
+            },
+            {
+              "method": "GET",
+              "path": "/queue",
+              "body": "",
+              "expected_status": 200,
+              "expected_body": ""
+            },
+            {
+              "method": "DELETE",
+              "path": "/queue",
+              "body": "",
+              "expected_status": 204,
+              "expected_body": ""
+            },
+            {
+              "method": "GET",
+              "path": "/queue/size",
+              "body": "",
+              "expected_status": 200,
+              "expected_body": "0"
+            }
+          ],
+          "category": "normal"
+        }
+      ]
+    },
+    {
+      "task_id": "scala_http_intervals_hidden",
+      "title": "Scheduling profit API",
+      "problem_statement": "Implement POST /schedule. Its UTF-8 body is n followed by n triples start end profit, separated by whitespace. Select mutually nonoverlapping half-open intervals [start,end) and return 200 with the maximum total profit as decimal text. Adjacent intervals are allowed; selecting none is allowed. 0 <= n <= 200000; 0 <= start < end <= 1000000000; 0 <= profit <= 1000000000. Invalid format or bounds returns 400 with body invalid. Other methods at /schedule return 405 with body method; other paths return 404 with body missing. Use 64-bit profit; choose an efficient algorithm yourself.",
+      "category": "other",
+      "difficulty": "hard",
+      "split": "hidden",
+      "language": "scala",
+      "execution_mode": "http",
+      "visible_tests": [
+        {
+          "requests": [
+            {
+              "method": "POST",
+              "path": "/schedule",
+              "body": "4 0 3 5 1 2 6 2 4 7 3 5 4",
+              "expected_status": 200,
+              "expected_body": "13"
+            },
+            {
+              "method": "POST",
+              "path": "/schedule",
+              "body": "0",
+              "expected_status": 200,
+              "expected_body": "0"
+            }
+          ],
+          "category": "normal"
+        }
+      ],
+      "hidden_tests": [
+        {
+          "requests": [
+            {
+              "method": "POST",
+              "path": "/schedule",
+              "body": "3 0 1 1000000000 1 2 1000000000 2 3 1000000000",
+              "expected_status": 200,
+              "expected_body": "3000000000"
+            },
+            {
+              "method": "POST",
+              "path": "/schedule",
+              "body": "1 3 2 8",
+              "expected_status": 400,
+              "expected_body": "invalid"
+            }
+          ],
+          "category": "normal"
+        }
+      ]
+    }
+  ]
+}

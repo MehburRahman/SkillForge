@@ -14,7 +14,7 @@ from src.benchmark.loader import VALID_CATEGORIES, VALID_SPLITS
 from src.benchmark.models import BenchmarkSummary, TaskBenchmarkResult
 from src.evaluation.pipeline import evaluate_candidate, evaluation_policy_identity
 from src.evolution.prompt_registry import load_default_registry
-from src.experiments import SEED_POLICY, validate_experiment, validate_generation_execution
+from src.experiments import SEED_POLICY, validate_experiment, validate_generation_execution, validate_reasoning_mode
 from src.reinforcement_loop import run_candidate_refinement_loop
 from src.verifier.outcome_verifier import verify
 
@@ -82,6 +82,7 @@ def run_benchmark(
     resume: bool = False,
     task_spec_cache=None,
     on_sweep_start=None,
+    reasoning_mode='direct',
 ) -> BenchmarkSummary:
     """Persist task results and resume a fixed experiment from task boundaries.
 
@@ -92,6 +93,7 @@ def run_benchmark(
     """
     selected_language = language
     _, language = validate_experiment(config_name, seed, language)
+    validate_reasoning_mode(reasoning_mode)
     validate_judge_pair(client, judge_client)
     if (run_id is not None or resume) and history_store is None:
         raise ValueError("--run-id/--resume require history storage")
@@ -101,26 +103,14 @@ def run_benchmark(
 
     registry = prompt_registry or load_default_registry()
     selected_prompt = registry.get(prompt_id) if prompt_id else registry.active_prompt
-    manifest = {
-        "protocol": 1,
-        "dataset_hash": _fingerprint(sorted((_dataset_record(t) for t in dataset.tasks), key=lambda t: t["task_id"])),
-        "task_ids": sorted(task.task_id for task in selected_tasks),
-        "prompt_id": selected_prompt.prompt_id,
-        "prompt_hash": _fingerprint(selected_prompt.prompt_text),
-        "prompt_templates": prompt_template_identity(),
-        "evaluation_policy": evaluation_policy_identity(),
-        "generator_model": getattr(client, "model", "unknown"),
-        "judge_model": getattr(judge_client, "model", "unknown") if judge_client is not None else None,
-        "config_name": config_name,  # None preserves the legacy dynamic/repeat policy.
-        "seed": seed, "language": language, "max_attempts": max_attempts,
-        "max_feedback_failures": max_feedback_failures,
-        "max_consecutive_repeats": max_consecutive_repeats,
-        "judge_max_attempts": judge_max_attempts,
-        "judge_review_threshold": judge_review_threshold,
-        "seed_policy": SEED_POLICY,
-        "analyzer": analyzer_fingerprint(),
-        "cache_policy": [CACHE_VERSION, ANALYSIS_SEED] if task_spec_cache is not None else None,
-    }
+    manifest = benchmark_manifest(
+        client, dataset, selected_tasks, selected_prompt,
+        config_name=config_name, seed=seed, language=language, max_attempts=max_attempts,
+        max_feedback_failures=max_feedback_failures, max_consecutive_repeats=max_consecutive_repeats,
+        judge_client=judge_client, judge_max_attempts=judge_max_attempts,
+        judge_review_threshold=judge_review_threshold, task_spec_cache=task_spec_cache,
+        reasoning_mode=reasoning_mode,
+    )
     if history_store is not None:
         run_id = history_store.begin_benchmark(manifest, run_id=run_id, resume=resume)
         if on_sweep_start is not None:
@@ -133,6 +123,8 @@ def run_benchmark(
             task_result = TaskBenchmarkResult(**json.loads(saved["result_json"]))
             summary.task_results.append(task_result)
             summary.resumed_tasks += 1
+            from src.evolution.promotion import monitor_training_completion
+            monitor_training_completion(history_store, registry, task.split)
             if on_task_complete is not None:
                 on_task_complete(task_result)
             continue
@@ -170,6 +162,7 @@ def run_benchmark(
                     complete_history=False,
                     task_spec_cache=task_spec_cache,
                     benchmark_run_id=run_id,
+                    reasoning_mode=reasoning_mode,
                 )
                 checkpoint = _visible_checkpoint(task, inner_result)
                 checkpoint["result"]["wall_clock_seconds"] = time.perf_counter() - task_started
@@ -213,6 +206,9 @@ def run_benchmark(
                 )
             raise
         summary.task_results.append(task_result)
+        if history_store is not None:
+            from src.evolution.promotion import monitor_training_completion
+            monitor_training_completion(history_store, registry, task.split)
         if on_task_complete is not None:
             on_task_complete(task_result)
 
@@ -221,6 +217,42 @@ def run_benchmark(
             history_store.finish_benchmark(run_id)
         )
     return summary
+
+
+def benchmark_manifest(client, dataset, selected_tasks, selected_prompt, *,
+                       config_name=None, seed=None, language="python", max_attempts=None,
+                       max_feedback_failures=3, max_consecutive_repeats=2,
+                       judge_client=None, judge_max_attempts=3, judge_review_threshold=0.5,
+                       task_spec_cache=None, reasoning_mode='direct'):
+    """Describe a sweep before executing it, also used to reserve paired runs."""
+    from src.experiments import preflight_execution
+    validate_reasoning_mode(reasoning_mode)
+    toolchains = {f"{t.language}:{t.execution_mode}": preflight_execution(t.language, t.execution_mode)
+                  for t in selected_tasks if t.language == "scala"}
+    return {
+        **({"toolchains": toolchains} if toolchains else {}),
+        **({'generator_options': dict(client.generation_options)} if getattr(client, 'generation_options', None) else {}),
+        **({'judge_options': dict(judge_client.generation_options)} if getattr(judge_client, 'generation_options', None) else {}),
+        **({'reasoning_mode': reasoning_mode} if reasoning_mode != 'direct' else {}),
+        "protocol": 1,
+        "dataset_hash": _fingerprint(sorted((_dataset_record(t) for t in dataset.tasks), key=lambda t: t["task_id"])),
+        "task_ids": sorted(task.task_id for task in selected_tasks),
+        "prompt_id": selected_prompt.prompt_id,
+        "prompt_hash": _fingerprint(selected_prompt.prompt_text),
+        "prompt_templates": prompt_template_identity(),
+        "evaluation_policy": evaluation_policy_identity(),
+        "generator_model": getattr(client, "model", "unknown"),
+        "judge_model": getattr(judge_client, "model", "unknown") if judge_client is not None else None,
+        "config_name": config_name,  # None preserves the legacy dynamic/repeat policy.
+        "seed": seed, "language": language, "max_attempts": max_attempts,
+        "max_feedback_failures": max_feedback_failures,
+        "max_consecutive_repeats": max_consecutive_repeats,
+        "judge_max_attempts": judge_max_attempts,
+        "judge_review_threshold": judge_review_threshold,
+        "seed_policy": SEED_POLICY,
+        "analyzer": analyzer_fingerprint(),
+        "cache_policy": [CACHE_VERSION, ANALYSIS_SEED] if task_spec_cache is not None else None,
+    }
 
 
 def _fingerprint(value):
@@ -264,5 +296,6 @@ def _visible_checkpoint(task, result):
             "analysis_wall_clock_seconds": result.analysis_wall_clock_seconds,
             "execution_mode": result.execution_mode,
             "entry_point": result.entry_point,
+            "reasoning_mode": result.reasoning_mode,
         },
     }

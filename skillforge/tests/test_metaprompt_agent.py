@@ -134,3 +134,22 @@ def test_rejects_invalid_attempt_limit_and_empty_current_prompt():
         )
     with pytest.raises(ValueError, match="current_prompt must be non-empty"):
         propose_prompt(client, "P0", "", {}, ())
+
+
+@pytest.mark.parametrize('mode', ['stdio', 'function', 'http'])
+def test_scala_proposals_preserve_the_selected_contract(mode):
+    proposal = 'Check boundary conditions. Output ONLY complete runnable Scala solution code without Markdown.'
+    client = ResponseClient([valid_response(proposed_prompt=proposal)])
+    result = propose_prompt(client, 'P0', 'Output ONLY complete Scala code.', {}, (),
+                            language='scala', execution_mode=mode)
+    assert result.proposed_prompt == proposal
+    assert f'Execution mode: {mode}' in client.requests[0]['prompt']
+    assert 'Python' not in client.requests[0]['system']
+    assert 'program code' not in client.requests[0]['prompt']
+
+
+def test_scala_evolution_rejects_a_python_output_contract():
+    client = ResponseClient([valid_response()])
+    with pytest.raises(ValueError, match='Scala output contract'):
+        propose_prompt(client, 'P0', 'Output ONLY complete Scala code.', {}, (),
+                       language='scala', max_attempts=1)

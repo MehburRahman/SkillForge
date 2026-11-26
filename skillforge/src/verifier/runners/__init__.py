@@ -11,4 +11,7 @@ def get_runner(language):
         return PythonRunner()
     if language == Language.JAVASCRIPT:
         return JavaScriptRunner()
+    if language == Language.SCALA:
+        from src.verifier.runners.scala import ScalaRunner
+        return ScalaRunner()
     raise ValueError(f"{language} execution is not implemented yet (project plan task 3.4)")

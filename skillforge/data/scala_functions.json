@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "tasks": [
+    {
+      "task_id": "scala_four_string_subsequence_train",
+      "title": "Shared subsequence of four strings",
+      "problem_statement": "Define object Solution with def solve(a: String, b: String, c: String, d: String): Int. Return the length of a longest sequence appearing as a subsequence of all four strings. Inputs contain lowercase ASCII letters, each length 0 to 40. A subsequence preserves order but need not be contiguous. Return only the length, and select the algorithm yourself.",
+      "category": "string",
+      "difficulty": "hard",
+      "split": "train",
+      "language": "scala",
+      "execution_mode": "function",
+      "visible_tests": [
+        {
+          "assertion": "assert(solve(\"abc\",\"bac\",\"cab\",\"ab\") == 1)",
+          "category": "normal"
+        },
+        {
+          "assertion": "assert(solve(\"\",\"abc\",\"abc\",\"abc\") == 0)",
+          "category": "edge"
+        }
+      ],
+      "hidden_tests": [
+        {
+          "assertion": "assert(solve(\"abac\",\"baca\",\"aabc\",\"caba\") == 2)",
+          "category": "normal"
+        },
+        {
+          "assertion": "assert(solve(\"aaaaaa\",\"aa\",\"aaa\",\"a\") == 1)",
+          "category": "edge"
+        }
+      ],
+      "entry_point": "solve"
+    },
+    {
+      "task_id": "scala_edit_distance_validation",
+      "title": "Unit-cost text edits",
+      "problem_statement": "Define object Solution with def solve(a: String, b: String): Int. Return the minimum number of single-character insertions, deletions, and substitutions transforming a into b. Each operation costs one. Both strings contain lowercase ASCII letters and have length 0 to 2000. No particular algorithm is mandated.",
+      "category": "string",
+      "difficulty": "hard",
+      "split": "validation",
+      "language": "scala",
+      "execution_mode": "function",
+      "visible_tests": [
+        {
+          "assertion": "assert(solve(\"kitten\",\"sitting\") == 3)",
+          "category": "normal"
+        },
+        {
+          "assertion": "assert(solve(\"\",\"abc\") == 3)",
+          "category": "edge"
+        }
+      ],
+      "hidden_tests": [
+        {
+          "assertion": "assert(solve(\"abac\",\"baca\") == 2)",
+          "category": "normal"
+        },
+        {
+          "assertion": "assert(solve(\"repeated\",\"repeated\") == 0)",
+          "category": "edge"
+        },
+        {
+          "assertion": "assert(solve(\"aaaaab\",\"baaaaa\") == 2)",
+          "category": "stress"
+        }
+      ],
+      "entry_point": "solve"
+    },
+    {
+      "task_id": "scala_balanced_partition_hidden",
+      "title": "Closest partition of integers",
+      "problem_statement": "Define object Solution with def solve(values: List[Int]): Long. Partition all elements into two groups, allowing empty groups, to minimize the absolute difference between group sums. Return the minimum difference as Long. 0 <= values.length <= 36; each value lies between 0 and 1000000000. Equal-valued elements are distinct and each must be assigned once. Choose any suitable efficient algorithm.",
+      "category": "array",
+      "difficulty": "hard",
+      "split": "hidden",
+      "language": "scala",
+      "execution_mode": "function",
+      "visible_tests": [
+        {
+          "assertion": "assert(solve(List(1,6,11,5)) == 1)",
+          "category": "normal"
+        },
+        {
+          "assertion": "assert(solve(List()) == 0)",
+          "category": "edge"
+        }
+      ],
+      "hidden_tests": [
+        {
+          "assertion": "assert(solve(List(1000000000,1000000000,1000000000)) == 1000000000)",
+          "category": "stress"
+        },
+        {
+          "assertion": "assert(solve(List(3,3,3,3,2)) == 2)",
+          "category": "normal"
+        }
+      ],
+      "entry_point": "solve"
+    }
+  ]
+}

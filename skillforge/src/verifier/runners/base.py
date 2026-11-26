@@ -1,6 +1,6 @@
 """Shared execution and evidence collection (local processes, not isolation)."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 import json
 import math
@@ -19,6 +19,7 @@ class Status(Enum):
     FAIL = "fail"  # A completed assertion failed; this is not a crash.
     TIMEOUT = "timeout"
     ERROR = "error"
+    COMPILE_ERROR = "compile_error"
 
 
 @dataclass
@@ -28,6 +29,12 @@ class ExecutionResult:
     stderr: str
     exit_code: int
     duration_seconds: float = 0.0
+    compilation_seconds: float = 0.0
+    execution_environment: dict = field(default_factory=dict)
+    http_failure: dict = field(default_factory=dict)
+    http_failures: list = field(default_factory=list)
+    http_observations: list = field(default_factory=list)
+    http_startup: dict = field(default_factory=dict)
 
 
 def _normalize_input(value):

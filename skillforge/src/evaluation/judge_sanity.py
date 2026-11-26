@@ -150,6 +150,7 @@ def run_judge_sanity(client, history_store, *, cases=None, seed=42, max_attempts
             "seed_policy": SEED_POLICY,
             "preflight_wall_clock_seconds": preflight_seconds,
             "evaluation_mode": "deterministic_evidence_supplied",
+            "judge_consistency_enforced": False,
         },
     )
     if on_start is not None:
@@ -164,6 +165,9 @@ def run_judge_sanity(client, history_store, *, cases=None, seed=42, max_attempts
             case.task_spec, getattr(case, label), verification, test_source="trusted",
             judge_client=judge, judge_max_attempts=max_attempts,
             judge_review_threshold=JUDGE_REVIEW_THRESHOLD,
+            # Measure raw judge mistakes in this diagnostic. Production solves
+            # reject contradictions before they become repair advice.
+            judge_enforce_consistency=False,
         )
         reasons = [reason.code for reason in report.review_reasons if reason.source == "judge"]
         result = {

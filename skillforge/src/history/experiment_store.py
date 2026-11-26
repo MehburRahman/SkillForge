@@ -1,4 +1,5 @@
 from dataclasses import asdict, is_dataclass
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from enum import Enum
 import hashlib
@@ -8,11 +9,11 @@ import sqlite3
 from typing import Iterable, Optional, Tuple
 from uuid import uuid4
 
-from src.experiments import CONFIG_NAMES
+from src.experiments import CONFIG_NAMES, validate_reasoning_mode
 from src.benchmark.execution_mode import validate_execution
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 12
 # Columns added to `runs` after schema version 1, applied additively on
 # every open. Later schema versions append here rather than writing a new
 # migration; see _ensure_runs_columns.
@@ -32,13 +33,19 @@ RUNS_ADDED_COLUMNS = (
     ("analysis_wall_clock_seconds", "REAL"),
     ("execution_mode", "TEXT NOT NULL DEFAULT 'stdio'"),
     ("entry_point", "TEXT"),
+    ("request_log_id", "TEXT"),
+    ("reasoning_mode", "TEXT NOT NULL DEFAULT 'direct'"),
+    ("test_model", "TEXT"),
+    ("test_model_calls", "INTEGER NOT NULL DEFAULT 0"),
 )
 VALID_BENCHMARK_SPLITS = frozenset({"adhoc", "train", "validation", "hidden"})
 # The experiment arms of the results grid. Validated on the way in so a
 # mistyped arm fails at run start rather than filing a whole sweep under a
 # name no analysis query matches.
 VALID_CONFIG_NAMES = frozenset(CONFIG_NAMES)
-VALID_PROMPT_DECISIONS = frozenset({"promoted", "rejected"})
+# Imperative labels are recommendations; past-tense labels remain readable
+# for older experiments that recorded an applied registry decision.
+VALID_PROMPT_DECISIONS = frozenset({"promote", "reject", "promoted", "rejected"})
 VALID_TEST_SOURCES = frozenset({"generated", "trusted"})
 DEFAULT_HISTORY_PATH = (
     Path(__file__).resolve().parents[2] / "data" / "experiments.sqlite3"
@@ -85,15 +92,18 @@ def _default_task_id(problem_statement: str) -> str:
 class ExperimentStore:
     """SQLite-backed storage for runs, attempts, reports, and failure signals."""
 
-    def __init__(self, path=DEFAULT_HISTORY_PATH):
+    def __init__(self, path=DEFAULT_HISTORY_PATH, *, readonly=False):
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if not readonly:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
         self._connection = None
         try:
-            self._connection = sqlite3.connect(str(self.path))
+            self._connection = (sqlite3.connect(self.path.resolve().as_uri() + '?mode=ro', uri=True)
+                                if readonly else sqlite3.connect(str(self.path)))
             self._connection.row_factory = sqlite3.Row
             self._connection.execute("PRAGMA foreign_keys = ON")
-            self._initialize_schema()
+            if not readonly:
+                self._initialize_schema()
         except ExperimentStoreError:
             if self._connection is not None:
                 self._connection.close()
@@ -211,6 +221,29 @@ class ExperimentStore:
                 CREATE INDEX IF NOT EXISTS idx_prompt_experiments_candidate
                     ON prompt_experiments(candidate_prompt_id);
 
+                CREATE TABLE IF NOT EXISTS evolution_checks (
+                    decision_id TEXT PRIMARY KEY,
+                    prompt_version TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN
+                        ('ready', 'blocked', 'started', 'candidate', 'duplicate', 'failed', 'cancelled')),
+                    attempt_started INTEGER NOT NULL,
+                    reason TEXT NOT NULL,
+                    evidence_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    candidate_prompt_id TEXT,
+                    duplicate_prompt_id TEXT,
+                    proposed_prompt_hash TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_evolution_prompt
+                    ON evolution_checks(prompt_version);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_evolution_one_pending
+                    ON evolution_checks((1)) WHERE status = 'started';
+                CREATE TABLE IF NOT EXISTS evolution_attempt_runs (
+                    run_id TEXT PRIMARY KEY REFERENCES runs(run_id),
+                    decision_id TEXT NOT NULL REFERENCES evolution_checks(decision_id)
+                );
+
                 CREATE TABLE IF NOT EXISTS benchmark_runs (
                     run_id TEXT PRIMARY KEY,
                     manifest_json TEXT NOT NULL,
@@ -227,6 +260,53 @@ class ExperimentStore:
                     last_error TEXT,
                     PRIMARY KEY (benchmark_run_id, task_id),
                     FOREIGN KEY (benchmark_run_id) REFERENCES benchmark_runs(run_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS prompt_validations (
+                    validation_id TEXT PRIMARY KEY,
+                    manifest_json TEXT NOT NULL,
+                    baseline_run_id TEXT NOT NULL UNIQUE REFERENCES benchmark_runs(run_id),
+                    candidate_run_id TEXT NOT NULL UNIQUE REFERENCES benchmark_runs(run_id),
+                    created_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    result_json TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS prompt_actions (
+                    action_id TEXT PRIMARY KEY,
+                    validation_id TEXT NOT NULL REFERENCES prompt_validations(validation_id),
+                    kind TEXT NOT NULL CHECK(kind IN ('promote', 'reject', 'rollback')),
+                    status TEXT NOT NULL CHECK(status IN ('pending', 'applied')),
+                    before_json TEXT NOT NULL,
+                    after_json TEXT NOT NULL,
+                    evidence_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    applied_at TEXT,
+                    UNIQUE(validation_id, kind)
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_one_pending_prompt_action
+                    ON prompt_actions((1)) WHERE status = 'pending';
+                CREATE TABLE IF NOT EXISTS rollback_monitors (
+                    validation_id TEXT PRIMARY KEY REFERENCES prompt_validations(validation_id),
+                    parent_prompt_id TEXT NOT NULL,
+                    child_prompt_id TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    reference_json TEXT NOT NULL,
+                    result_json TEXT
+                );
+                CREATE TABLE IF NOT EXISTS evolution_rounds (
+                    round_id TEXT PRIMARY KEY,
+                    manifest_json TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    trigger_id TEXT REFERENCES evolution_checks(decision_id),
+                    candidate_prompt_id TEXT,
+                    validation_id TEXT NOT NULL UNIQUE,
+                    result_json TEXT,
+                    meta_model_calls INTEGER NOT NULL DEFAULT 0,
+                    meta_wall_clock_seconds REAL NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
                 );
 
                 -- Fixed judge diagnostics are never prompt-training evidence.
@@ -258,6 +338,25 @@ class ExperimentStore:
                     f"{row['value']}"
                 )
             self._ensure_runs_columns()
+            for table, additions in {
+                "attempts": (("duplicate_of", "INTEGER"), ("reused_from", "INTEGER")),
+                "evolution_checks": (("proposal_retry_count", "INTEGER NOT NULL DEFAULT 0"),
+                                     ("failure_kind", "TEXT")),
+            }.items():
+                columns = {r["name"] for r in self._connection.execute(f"PRAGMA table_info({table})")}
+                for name, declaration in additions:
+                    if name not in columns:
+                        self._connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
+            self._connection.execute("""CREATE TABLE IF NOT EXISTS model_requests (
+                call_id INTEGER PRIMARY KEY AUTOINCREMENT, owner_id TEXT NOT NULL,
+                role TEXT NOT NULL, stage TEXT NOT NULL, request_json TEXT NOT NULL,
+                response_text TEXT, error TEXT, usage_json TEXT NOT NULL,
+                duration_seconds REAL NOT NULL, created_at TEXT NOT NULL)""")
+            self._connection.execute("CREATE INDEX IF NOT EXISTS model_request_owner ON model_requests(owner_id)")
+            self._connection.execute("""CREATE TABLE IF NOT EXISTS proposal_rejections (
+                rejection_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                decision_id TEXT NOT NULL REFERENCES evolution_checks(decision_id),
+                response_text TEXT NOT NULL, error TEXT NOT NULL, created_at TEXT NOT NULL)""")
             if row is None:
                 self._connection.execute(
                     "INSERT INTO metadata(key, value) VALUES('schema_version', ?)",
@@ -381,6 +480,8 @@ class ExperimentStore:
         benchmark_run_id: Optional[str] = None,
         execution_mode: str = "stdio",
         entry_point: Optional[str] = None,
+        reasoning_mode: str = "direct",
+        test_model: Optional[str] = None,
     ) -> str:
         if not isinstance(problem_statement, str) or not problem_statement.strip():
             raise ExperimentStoreError("problem_statement must be non-empty")
@@ -393,6 +494,10 @@ class ExperimentStore:
         if config_name is not None and config_name not in VALID_CONFIG_NAMES:
             allowed = ", ".join(sorted(VALID_CONFIG_NAMES))
             raise ExperimentStoreError(f"config_name must be one of: {allowed}")
+        try:
+            validate_reasoning_mode(reasoning_mode)
+        except ValueError as exc:
+            raise ExperimentStoreError(str(exc)) from exc
         if seed is not None and (
             isinstance(seed, bool) or not isinstance(seed, int) or seed < 0
         ):
@@ -407,6 +512,7 @@ class ExperimentStore:
             ("attempt_budget_source", attempt_budget_source),
             ("attempt_budget_reason", attempt_budget_reason),
             ("judge_model", judge_model),
+            ("test_model", test_model),
             ("language", language),
         ):
             if value is not None and (
@@ -449,8 +555,8 @@ class ExperimentStore:
                         judge_model, config_name, seed, language,
                         attempt_budget, attempt_budget_source,
                         attempt_budget_reason, started_at, benchmark_run_id,
-                        execution_mode, entry_point
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        execution_mode, entry_point, reasoning_mode, test_model
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         resolved_run_id,
@@ -480,6 +586,8 @@ class ExperimentStore:
                         benchmark_run_id,
                         execution_mode.value,
                         entry_point,
+                        reasoning_mode,
+                        test_model.strip() if test_model is not None else None,
                     ),
                 )
         except sqlite3.IntegrityError as exc:
@@ -556,6 +664,11 @@ class ExperimentStore:
                     values,
                 )
                 self._connection.execute(
+                    "UPDATE attempts SET duplicate_of=?, reused_from=? WHERE run_id=? AND attempt_number=?",
+                    (getattr(attempt, "duplicate_of", None), getattr(attempt, "reused_from", None),
+                     run_id, attempt.attempt_number),
+                )
+                self._connection.execute(
                     "DELETE FROM failure_signals WHERE run_id = ? AND attempt_number = ?",
                     (run_id, attempt.attempt_number),
                 )
@@ -604,7 +717,7 @@ class ExperimentStore:
                 SET completed_at = ?, final_status = ?, stop_reason = ?,
                     best_attempt_number = ?, model_calls = ?,
                     wall_clock_seconds = ?, task_spec_cache_hit = ?,
-                    analysis_model_calls = ?, analysis_wall_clock_seconds = ?
+                    analysis_model_calls = ?, analysis_wall_clock_seconds = ?, test_model_calls = ?
                 WHERE run_id = ?
                 """,
                 (
@@ -617,6 +730,7 @@ class ExperimentStore:
                     int(result.task_spec_cache_hit),
                     result.analysis_model_calls,
                     result.analysis_wall_clock_seconds,
+                    getattr(result, 'test_model_calls', 0),
                     run_id,
                 ),
             )
@@ -641,7 +755,7 @@ class ExperimentStore:
         else:
             if resume:
                 raise ExperimentStoreError(f"unknown benchmark run ID: {run_id}")
-            with self._connection:
+            with (nullcontext() if self._connection.in_transaction else self._connection):
                 self._connection.execute(
                     "INSERT INTO benchmark_runs(run_id, manifest_json, started_at) VALUES (?, ?, ?)",
                     (run_id, _json_dump(manifest), _timestamp()),
@@ -651,6 +765,84 @@ class ExperimentStore:
                     [(run_id, task_id) for task_id in manifest["task_ids"]],
                 )
         return run_id
+
+    def begin_prompt_validation(self, manifest, validation_id=None, resume=False):
+        """Reserve both benchmark arms atomically, or reopen the identical pair."""
+        if resume and not validation_id:
+            raise ExperimentStoreError("resume requires validation_id")
+        if validation_id is not None and (
+            not isinstance(validation_id, str) or not validation_id.strip()
+        ):
+            raise ExperimentStoreError("validation_id must be a non-empty string")
+        validation_id = validation_id or str(uuid4())
+        with self.evolution_transaction():
+            row = self.get_prompt_validation(validation_id)
+            if row is not None:
+                if not resume:
+                    raise ExperimentStoreError("validation ID already exists; use resume=True")
+                if json.loads(row["manifest_json"]) != manifest:
+                    raise ExperimentStoreError("cannot resume: validation settings or contents have changed")
+            else:
+                if resume:
+                    raise ExperimentStoreError(f"unknown validation ID: {validation_id}")
+                baseline_id = self.begin_benchmark(manifest["baseline"])
+                candidate_id = self.begin_benchmark(manifest["candidate"])
+                self._connection.execute(
+                    """INSERT INTO prompt_validations(
+                       validation_id, manifest_json, baseline_run_id, candidate_run_id, created_at
+                       ) VALUES (?, ?, ?, ?, ?)""",
+                    (validation_id, _json_dump(manifest), baseline_id, candidate_id, _timestamp()),
+                )
+        return self.get_prompt_validation(validation_id)
+
+    def get_prompt_validation(self, validation_id):
+        row = self._connection.execute(
+            "SELECT * FROM prompt_validations WHERE validation_id = ?", (validation_id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def finish_prompt_validation(self, result):
+        """Save a recommendation and its paired evidence in one commit, once."""
+        payload = _json_dump(result)
+        with self.evolution_transaction():
+            row = self.get_prompt_validation(result.validation_id)
+            if row is None:
+                raise ExperimentStoreError("unknown prompt validation")
+            if row["result_json"] is not None:
+                if row["result_json"] != payload:
+                    raise ExperimentStoreError("prompt validation already has a different result")
+                return
+            manifest = json.loads(row["manifest_json"])
+            task_ids = [outcome.task_id for outcome in result.task_outcomes]
+            if (result.baseline_prompt_id != manifest["baseline"]["prompt_id"]
+                    or result.candidate_prompt_id != manifest["candidate"]["prompt_id"]
+                    or result.seed != manifest["baseline"]["seed"]
+                    or result.max_attempts != manifest["baseline"]["max_attempts"]
+                    or sorted(task_ids) != manifest["baseline"]["task_ids"]
+                    or result.comparison.task_count != len(task_ids)):
+                raise ExperimentStoreError("validation result does not match its reserved pair")
+            for key in ("baseline_run_id", "candidate_run_id"):
+                run = self._connection.execute(
+                    "SELECT completed_at FROM benchmark_runs WHERE run_id = ?", (row[key],),
+                ).fetchone()
+                if getattr(result, key) != row[key] or run is None or run["completed_at"] is None:
+                    raise ExperimentStoreError("both paired benchmarks must be complete")
+            comparison = result.comparison
+            self.record_prompt_experiment(
+                baseline_prompt_id=result.baseline_prompt_id,
+                candidate_prompt_id=result.candidate_prompt_id,
+                benchmark_split="validation", task_count=comparison.task_count,
+                baseline_pass_rate=comparison.baseline_pass_rate,
+                candidate_pass_rate=comparison.candidate_pass_rate,
+                candidate_only_passes=comparison.candidate_only_passes,
+                baseline_only_passes=comparison.baseline_only_passes,
+                p_value=comparison.p_value, decision=comparison.decision,
+                reason=comparison.reason, experiment_id=result.validation_id,
+            )
+            self._connection.execute(
+                "UPDATE prompt_validations SET result_json = ?, completed_at = ? WHERE validation_id = ?",
+                (payload, _timestamp(), result.validation_id),
+            )
 
     def benchmark_task(self, run_id, task_id):
         row = self._connection.execute(
@@ -788,7 +980,7 @@ class ExperimentStore:
 
         resolved_id = str(uuid4()) if experiment_id is None else experiment_id
         try:
-            with self._connection:
+            with (nullcontext() if self._connection.in_transaction else self._connection):
                 self._connection.execute(
                     """
                     INSERT INTO prompt_experiments(
@@ -877,6 +1069,325 @@ class ExperimentStore:
             )
         placeholders = ",".join("?" for _ in splits)
         return splits, placeholders
+
+    @contextmanager
+    def evolution_transaction(self):
+        """Serialize evidence selection and reservation; never hold over model calls."""
+        if self._connection.in_transaction:
+            raise ExperimentStoreError("evolution check requires its own transaction")
+        with self._connection:
+            self._connection.execute("BEGIN IMMEDIATE")
+            yield
+
+    def record_model_request(self, owner_id, role, stage, request, response, error, usage, seconds):
+        with self._connection:
+            self._connection.execute("""INSERT INTO model_requests
+                (owner_id,role,stage,request_json,response_text,error,usage_json,duration_seconds,created_at)
+                VALUES (?,?,?,?,?,?,?,?,?)""",
+                (owner_id, role, stage, _json_dump(request), response, error,
+                 _json_dump(usage or {}), seconds, _timestamp()))
+
+    def link_request_log(self, run_id, owner_id):
+        with self._connection:
+            self._connection.execute("UPDATE runs SET request_log_id=? WHERE run_id=?", (owner_id, run_id))
+
+    def record_proposal_rejection(self, decision_id, response, error):
+        with self._connection:
+            self._connection.execute("INSERT INTO proposal_rejections(decision_id,response_text,error,created_at) VALUES (?,?,?,?)",
+                                     (decision_id, response, error, _timestamp()))
+
+    def retry_failed_proposal(self, decision_id, prompt_id):
+        """One explicit format-recovery retry; keep the original evidence membership."""
+        if not self._connection.in_transaction:
+            raise ExperimentStoreError('Proposal retry requires an evolution transaction')
+        record = self.get_evolution_check(decision_id)
+        if (record['status'] != 'failed' or record['failure_kind'] != 'proposal_validation'
+                or record['prompt_version'] != prompt_id or record['proposal_retry_count'] >= 1):
+            raise ExperimentStoreError('Only a failed proposal-validation round can be retried, once, with its original active prompt')
+        if self._connection.execute("SELECT 1 FROM evolution_checks WHERE status='started'").fetchone():
+            raise ExperimentStoreError('An evolution attempt is already in progress')
+        if self._connection.execute("SELECT 1 FROM evolution_rounds WHERE status NOT IN ('complete','failed','blocked') AND trigger_id IS NOT ?", (decision_id,)).fetchone():
+            raise ExperimentStoreError('Another evolution round is still in progress')
+        self._connection.execute("""UPDATE evolution_checks SET status='started', finished_at=NULL,
+            failure_kind=NULL, proposal_retry_count=proposal_retry_count+1,
+            reason='Explicit proposal-validation retry using the original frozen training evidence.'
+            WHERE decision_id=?""", (decision_id,))
+        return record['evidence']
+
+    def training_execution_scopes(self):
+        rows = self._connection.execute(
+            "SELECT DISTINCT COALESCE(language, 'python'), COALESCE(execution_mode, 'stdio') "
+            "FROM runs WHERE benchmark_split = 'train'").fetchall()
+        return [(row[0], row[1]) for row in rows]
+
+    def training_reasoning_modes(self):
+        """Return the solving modes used by the training workspace."""
+        columns = {row['name'] for row in self._connection.execute('PRAGMA table_info(runs)')}
+        # Readiness opens history read-only, before a writable open can apply
+        # migrations. Histories without this column contain direct solves.
+        mode = "COALESCE(reasoning_mode, 'direct')" if 'reasoning_mode' in columns else "'direct'"
+        rows = self._connection.execute(
+            f"SELECT DISTINCT {mode} AS reasoning_mode "
+            "FROM runs WHERE benchmark_split = 'train' ORDER BY reasoning_mode"
+        ).fetchall()
+        return [row["reasoning_mode"] for row in rows]
+
+    def evolution_evidence(self, prompt_version, limit=50):
+        """New completed training runs, with each category counted once per run.
+
+        Membership, rather than start timestamps or rowids, handles late-finishing
+        runs and restarts. Only visible attempt signals are read, never benchmark
+        hidden results or assertion evidence.
+        """
+        eligible = """WITH eligible AS (
+            SELECT r.* FROM runs r
+            WHERE r.benchmark_split = 'train' AND r.prompt_version = ?
+              AND r.completed_at IS NOT NULL AND r.final_status IN ('pass', 'fail', 'review')
+              AND NOT EXISTS (SELECT 1 FROM evolution_attempt_runs used WHERE used.run_id = r.run_id)
+        ) """
+        runs = self._connection.execute(
+            eligible + "SELECT run_id, task_id, final_status FROM eligible ORDER BY completed_at, run_id",
+            (prompt_version,),
+        ).fetchall()
+        joins = """ FROM eligible r JOIN attempts a ON a.run_id = r.run_id
+            JOIN failure_signals s ON s.run_id = a.run_id AND s.attempt_number = a.attempt_number
+            WHERE a.prompt_version = ? """
+        counts = self._connection.execute(
+            eligible + "SELECT s.category, COUNT(DISTINCT r.run_id) AS count" + joins
+            + " GROUP BY s.category ORDER BY s.category", (prompt_version, prompt_version),
+        ).fetchall()
+        observations = self._connection.execute(
+            eligible + "SELECT r.task_id, s.category, s.strength, s.source, s.message" + joins
+            + " ORDER BY r.completed_at DESC, r.run_id, a.attempt_number, s.signal_index LIMIT ?",
+            (prompt_version, prompt_version, limit),
+        ).fetchall()
+        previous = self._connection.execute(
+            "SELECT 1 FROM evolution_checks WHERE prompt_version = ? AND attempt_started = 1 LIMIT 1",
+            (prompt_version,),
+        ).fetchone()
+        pending = self._connection.execute(
+            "SELECT decision_id FROM evolution_checks WHERE status = 'started'",
+        ).fetchone()
+        return {
+            "run_ids": [r["run_id"] for r in runs],
+            "task_ids": sorted({r["task_id"] for r in runs}),
+            "training_runs": len(runs),
+            "training_pass_rate": sum(r["final_status"] == "pass" for r in runs) / len(runs) if runs else 0.0,
+            "failure_counts": {r["category"]: r["count"] for r in counts},
+            "observations": [dict(r) for r in observations],
+            "has_previous_attempt": previous is not None,
+            "pending_attempt_id": pending["decision_id"] if pending else None,
+        }
+
+    def record_evolution_check(self, prompt_version, status, reason, evidence):
+        """Called inside evolution_transaction so checking and reserving are atomic."""
+        if not self._connection.in_transaction:
+            raise ExperimentStoreError("evolution check must be recorded inside its transaction")
+        if status not in {"ready", "blocked", "started"}:
+            raise ExperimentStoreError("invalid initial evolution status")
+        decision_id = str(uuid4())
+        started = status == "started"
+        self._connection.execute(
+            """INSERT INTO evolution_checks(
+                decision_id, prompt_version, status, attempt_started, reason, evidence_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (decision_id, prompt_version, status, int(started), reason, _json_dump(evidence), _timestamp()),
+        )
+        if started:
+            self._connection.executemany(
+                "INSERT INTO evolution_attempt_runs(run_id, decision_id) VALUES (?, ?)",
+                [(run_id, decision_id) for run_id in evidence["run_ids"]],
+            )
+        return decision_id
+
+    def evolution_attempt_pending(self, decision_id):
+        """Check ownership under evolution_transaction before publishing a proposal."""
+        return self._connection.execute(
+            "SELECT 1 FROM evolution_checks WHERE decision_id = ? AND status = 'started'",
+            (decision_id,),
+        ).fetchone() is not None
+
+    def finish_evolution_attempt(self, decision_id, status, reason, *, candidate_prompt_id=None,
+                                 duplicate_prompt_id=None, proposed_prompt_hash=None, failure_kind=None):
+        """Finalize a reservation without releasing an enclosing transaction.
+
+        For crash recovery, use recover_evolution_attempt after confirming the
+        proposer has stopped: it also reconciles candidates already saved in
+        the registry. Consumed evidence stays consumed, including failed attempts.
+        """
+        if status not in {"candidate", "duplicate", "failed", "cancelled"}:
+            raise ExperimentStoreError("invalid final evolution status")
+        # When finalization belongs to a larger evolution transaction, leave
+        # commit/rollback to its owner rather than releasing its lock early.
+        transaction = nullcontext() if self._connection.in_transaction else self._connection
+        with transaction:
+            cursor = self._connection.execute(
+                """UPDATE evolution_checks SET status = ?, reason = ?, finished_at = ?,
+                   candidate_prompt_id = ?, duplicate_prompt_id = ?, proposed_prompt_hash = ?, failure_kind = ?
+                   WHERE decision_id = ? AND status = 'started'""",
+                (status, reason, _timestamp(), candidate_prompt_id, duplicate_prompt_id,
+                 proposed_prompt_hash, failure_kind, decision_id),
+            )
+            if cursor.rowcount != 1:
+                raise ExperimentStoreError("evolution attempt is missing or already finished")
+
+    def evolution_checks(self, prompt_version=None):
+        query = "SELECT * FROM evolution_checks"
+        parameters = ()
+        if prompt_version is not None:
+            query += " WHERE prompt_version = ?"
+            parameters = (prompt_version,)
+        records = []
+        for row in self._connection.execute(query + " ORDER BY rowid", parameters):
+            record = dict(row)
+            record["evidence"] = json.loads(record.pop("evidence_json"))
+            records.append(record)
+        return records
+
+    def get_evolution_check(self, decision_id):
+        row = self._connection.execute(
+            "SELECT * FROM evolution_checks WHERE decision_id = ?", (decision_id,),
+        ).fetchone()
+        if row is None:
+            raise ExperimentStoreError(f"unknown evolution decision: {decision_id}")
+        record = dict(row)
+        record["evidence"] = json.loads(record.pop("evidence_json"))
+        return record
+
+    def prompt_action(self, action_id):
+        row = self._connection.execute(
+            "SELECT * FROM prompt_actions WHERE action_id = ?", (action_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def pending_prompt_actions(self):
+        return [dict(r) for r in self._connection.execute(
+            "SELECT * FROM prompt_actions WHERE status = 'pending' ORDER BY created_at, action_id"
+        )]
+
+    def prepare_prompt_action(self, action_id, validation_id, kind, before, after, evidence):
+        """Durable intent precedes the atomic registry-file replacement."""
+        with self.evolution_transaction():
+            self._connection.execute(
+                """INSERT INTO prompt_actions VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, NULL)""",
+                (action_id, validation_id, kind, _json_dump(before), _json_dump(after),
+                 _json_dump(evidence), _timestamp()),
+            )
+        return self.prompt_action(action_id)
+
+    def finish_prompt_action(self, action_id):
+        """Commit the applied action and its monitoring state together."""
+        with self.evolution_transaction():
+            action = self.prompt_action(action_id)
+            if action is None:
+                raise ExperimentStoreError("unknown prompt action")
+            if action["status"] == "applied":
+                return action
+            evidence = json.loads(action["evidence_json"])
+            now = _timestamp()
+            if action["kind"] == "promote":
+                reference = evidence["rollback_reference"]
+                self._connection.execute(
+                    """INSERT INTO rollback_monitors VALUES (?, ?, ?, ?, ?, ?, NULL)""",
+                    (action["validation_id"], evidence["parent_prompt_id"], evidence["child_prompt_id"],
+                     action["created_at"], "watching" if reference["run_ids"] else "unavailable", _json_dump(reference)),
+                )
+            elif action["kind"] == "rollback":
+                self._connection.execute(
+                    "UPDATE rollback_monitors SET status = 'rolled_back', result_json = ? WHERE validation_id = ?",
+                    (_json_dump(evidence["result"]), action["validation_id"]),
+                )
+            self._connection.execute(
+                "UPDATE prompt_actions SET status = 'applied', applied_at = ? WHERE action_id = ?",
+                (now, action_id),
+            )
+        return self.prompt_action(action_id)
+
+    def rollback_monitors(self, *, watching_only=False):
+        query = "SELECT * FROM rollback_monitors"
+        if watching_only:
+            query += " WHERE status = 'watching'"
+        return [dict(r) for r in self._connection.execute(query + " ORDER BY started_at, validation_id")]
+
+    def update_rollback_monitor(self, validation_id, status, result):
+        if status not in {"watching", "kept", "superseded"}:
+            raise ExperimentStoreError("invalid rollback monitor status")
+        with self._connection:
+            self._connection.execute(
+                "UPDATE rollback_monitors SET status = ?, result_json = ? WHERE validation_id = ? AND status = 'watching'",
+                (status, _json_dump(result), validation_id),
+            )
+
+    def rollback_training_runs(self, prompt_id, *, after=None, watermark=0):
+        """Visible best-attempt evidence only; never read hidden test outcomes.
+
+        Exclude runs already in flight at promotion, partial runs, generated
+        oracles and attempts recorded under another prompt/model.
+        """
+        rows = self._connection.execute(
+            """SELECT r.*, r.rowid AS run_sequence, a.hard_gate_passed,
+                      b.manifest_json AS benchmark_manifest_json,
+                      a.functional_grade_json, a.evaluation_status
+               FROM runs r JOIN attempts a
+                 ON a.run_id = r.run_id AND a.attempt_number = r.best_attempt_number
+               LEFT JOIN benchmark_runs b ON b.run_id = r.benchmark_run_id
+               WHERE r.prompt_version = ? AND r.benchmark_split = 'train'
+                 AND r.completed_at IS NOT NULL AND r.test_source = 'trusted'
+                 AND r.final_status IN ('pass', 'fail', 'review')
+                 AND a.prompt_version = r.prompt_version AND a.model_name = r.model_name
+                 AND r.rowid > ? AND (? IS NULL OR julianday(r.started_at) >= julianday(?))
+               ORDER BY julianday(r.completed_at), r.rowid""",
+            (prompt_id, watermark, after, after),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def training_run_watermark(self):
+        return self._connection.execute("SELECT COALESCE(MAX(rowid), 0) FROM runs").fetchone()[0]
+
+    def get_evolution_round(self, round_id):
+        row = self._connection.execute(
+            "SELECT * FROM evolution_rounds WHERE round_id = ?", (round_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def begin_evolution_round(self, round_id, manifest, *, resume=False):
+        with self.evolution_transaction():
+            row = self.get_evolution_round(round_id)
+            if row:
+                if not resume:
+                    raise ExperimentStoreError("evolution round already exists; use --resume")
+                if json.loads(row["manifest_json"]) != manifest:
+                    raise ExperimentStoreError("cannot resume: evolution settings or contents changed")
+            else:
+                if resume:
+                    raise ExperimentStoreError("unknown evolution round")
+                pending = self._connection.execute(
+                    "SELECT round_id FROM evolution_rounds WHERE status NOT IN ('complete', 'blocked', 'failed')"
+                ).fetchone()
+                if pending:
+                    raise ExperimentStoreError(f"resume unfinished evolution round {pending['round_id']} first")
+                now = _timestamp()
+                self._connection.execute(
+                    """INSERT INTO evolution_rounds(round_id, manifest_json, status, validation_id,
+                       created_at, updated_at) VALUES (?, ?, 'prepared', ?, ?, ?)""",
+                    (round_id, _json_dump(manifest), str(uuid4()), now, now),
+                )
+        return self.get_evolution_round(round_id)
+
+    def update_evolution_round(self, round_id, *, status, trigger_id=None,
+                               candidate_prompt_id=None, result=None, meta_calls=0, meta_seconds=0):
+        if status not in {"prepared", "proposing", "validating", "applying", "complete", "blocked", "failed"}:
+            raise ExperimentStoreError("invalid evolution round status")
+        with (nullcontext() if self._connection.in_transaction else self._connection):
+            self._connection.execute(
+                """UPDATE evolution_rounds SET status = ?, trigger_id = COALESCE(?, trigger_id),
+                   candidate_prompt_id = COALESCE(?, candidate_prompt_id), result_json = COALESCE(?, result_json),
+                   meta_model_calls = meta_model_calls + ?,
+                   meta_wall_clock_seconds = meta_wall_clock_seconds + ?, updated_at = ?
+                   WHERE round_id = ?""",
+                (status, trigger_id, candidate_prompt_id, _json_dump(result) if result is not None else None,
+                 meta_calls, meta_seconds, _timestamp(), round_id),
+            )
 
     def failure_counts(
         self,

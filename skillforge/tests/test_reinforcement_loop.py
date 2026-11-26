@@ -31,8 +31,15 @@ class FakeRepairClient:
                 "constraints": "two integers",
                 "selected_max_attempts": 4,
                 "attempt_budget_reason": "Two candidate repairs may be useful.",
-                "examples": [{"input": "2 3", "output": "5"}]
+                "examples": []
             }"""
+        if "review generated programming tests" in system.lower():
+            return json.dumps([
+                dict(test_number=i, input_valid=True, output_verified=True,
+                     expected_output='5', category_valid=True,
+                     reason='Adding the two supplied integers gives five.')
+                for i in (1, 2)
+            ])
         if "test cases" in system.lower():
             return """[
                 {"input": "2 3", "expected_output": "5", "category": "normal"},
@@ -44,7 +51,7 @@ class FakeRepairClient:
             assert "Candidate repair feedback:" in prompt
             assert "LOGIC_ERROR" in prompt
             return "```python\na, b = map(int, input().split())\nprint(a + b)\n```"
-        if "competitive programmer" in system.lower():
+        if "competitive programmer" in system.lower() and "repair incorrect" not in system.lower():
             return "print(0)"
         raise AssertionError("Unexpected model request")
 
@@ -106,7 +113,7 @@ class ConstraintRepairClient(FakeRepairClient):
                 "attempt_budget_reason": "Constraint repair may be required.",
                 "examples": [],
             })
-        if "competitive programmer" in system.lower():
+        if "competitive programmer" in system.lower() and "repair incorrect" not in system.lower():
             return "values = list(map(int, input().split()))\nvalues.sort()\nprint(*values)"
         if "repair incorrect" in system.lower():
             self.repair_prompts.append(prompt)
@@ -195,7 +202,7 @@ class BudgetLimitedClient(FakeRepairClient):
                 "attempt_budget_reason": "Two attempts are sufficient.",
                 "examples": [],
             })
-        if "competitive programmer" in system.lower():
+        if "competitive programmer" in system.lower() and "repair incorrect" not in system.lower():
             return "print(0)"
         if "repair incorrect" in system.lower():
             self.repair_calls += 1

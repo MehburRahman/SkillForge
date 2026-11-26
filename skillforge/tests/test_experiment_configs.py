@@ -174,15 +174,18 @@ def test_bad_experiment_options_fail_before_model_calls(arguments, message):
     assert client.requests == []
 
 
-def test_programmatic_loop_rejects_same_family_before_analysis():
+def test_programmatic_same_family_judge_provenance_is_explicit():
     client = RecordingClient()
     client.model = "qwen2.5-coder:7b"
-    with pytest.raises(ValueError, match="different model families"):
-        run_task(client, judge_client=LLMClient("qwen2.5:3b"))
+    assert not llm_module.validate_judge_pair(client, LLMClient("qwen2.5:3b"))['independent_family']
     assert client.requests == []
 
 
 def test_every_pipeline_request_is_seeded_including_generated_test_retries(monkeypatch):
+    # This fixture exercises the legacy single-request analyzer; delivery and
+    # native wire schemas have their own integration coverage.
+    monkeypatch.setattr(LLMClient, 'task_format_output_budget', None)
+    monkeypatch.setattr(LLMClient, 'structured_test_review', False)
     requests = []
     test_calls = 0
 
@@ -195,6 +198,10 @@ def test_every_pipeline_request_is_seeded_including_generated_test_retries(monke
                 "problem_type": "math", "constraints": "", "examples": [],
                 "selected_max_attempts": 9, "attempt_budget_reason": "Nine.",
             })
+        elif "review generated programming tests" in system:
+            assert request["format"]["type"] == "array"
+            content = json.dumps([dict(test_number=1, input_valid=True, output_verified=True,
+                expected_output="99", category_valid=True, reason="The task always prints ninety-nine.")])
         elif "test cases" in system:
             test_calls += 1
             content = "invalid" if test_calls == 1 else json.dumps([
@@ -207,21 +214,22 @@ def test_every_pipeline_request_is_seeded_including_generated_test_retries(monke
                 "problem_understanding": 0.9, "algorithm_suitability": 0.9,
                 "edge_case_handling": 0.9, "requirement_adherence": 0.9,
                 "code_quality": 0.9, "overall_score": 0.9, "critical_issues": [],
-                "feedback": "No issue.", "likely_failure_category": "NONE",
+                "feedback": "The output contradicts the expected result.", "likely_failure_category": "LOGIC_ERROR",
             })
         else:
             content = "print(0)"  # exhaust all three candidates
         return {"message": {"content": content}}
 
-    monkeypatch.setattr(llm_module, "ollama", SimpleNamespace(chat=fake_chat))
+    monkeypatch.setattr(llm_module, "ollama", SimpleNamespace(
+        Client=lambda **kwargs: SimpleNamespace(chat=fake_chat)))
     result = run_candidate_refinement_loop(
         LLMClient("generator"), "Read an integer and print ninety-nine.",
         judge_client=LLMClient("judge"), config_name="scalar_repair", seed=42,
     )
     assert len(result.attempts) == 3
-    # Analysis + two test requests + three candidates + three judges.
-    assert result.model_calls == len(requests) == 9
+    # Analysis + two test requests + blind review + three candidates + three judges.
+    assert result.model_calls == len(requests) == 10
     seeds = [r["options"]["seed"] for r in requests]
-    assert len(set(seeds)) == 9
+    assert len(set(seeds)) == 10
     assert all(isinstance(seed, int) and seed >= 0 for seed in seeds)
     assert [r["model"] for r in requests].count("judge") == 3

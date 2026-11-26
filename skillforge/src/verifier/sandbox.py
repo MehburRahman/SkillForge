@@ -10,11 +10,14 @@ from src.verifier.runners.base import ExecutionResult, Status, _normalize_input
 def run_code_many(
     code: str, stdin_inputs: List[Any], timeout: float = 5, *,
     language="python", execution_mode="stdio", entry_point=None,
+    on_progress=None,
 ) -> List[ExecutionResult]:
     """Run stdin inputs or native assertion sources against one candidate file."""
     language, execution_mode, entry_point = validate_execution(language, execution_mode, entry_point)
+    options = {"on_progress": on_progress} if language == "scala" and on_progress is not None else {}
     return get_runner(language).run_many(
         code, stdin_inputs, timeout=timeout, execution_mode=execution_mode, entry_point=entry_point,
+        **options,
     )
 
 

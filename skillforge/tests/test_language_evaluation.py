@@ -102,8 +102,12 @@ def test_javascript_gates_preserve_failures_even_with_perfect_judge(code, reason
     assert report.status == expected
     assert report.hard_gate_passed is (reason is None)
     assert report.constraint_grade.analysis_error is None
-    assert report.judge_grade.overall_score == 1
-    assert [r.code for r in report.review_reasons] == (["UNVERIFIED_CONSTRAINTS"] if constrained else [])
+    if reason:
+        assert report.judge_grade is None and "contradicts" in report.judge_error
+        assert "JUDGE_UNAVAILABLE" in [r.code for r in report.review_reasons]
+    else:
+        assert report.judge_grade.overall_score == 1
+        assert [r.code for r in report.review_reasons] == (["UNVERIFIED_CONSTRAINTS"] if constrained else [])
     if reason:
         assert reason in [r.code for r in report.failure_reasons]
     assert judge.payloads[0]["execution_contract"] == {
@@ -171,7 +175,23 @@ def test_mixed_language_benchmark_history_hidden_evaluation_and_resume(tmp_path,
         assert hidden_evidence["execution_contract"] == {
             "language": "javascript", "execution_mode": "function", "entry_point": "solve",
         }
-        assert "913" not in json.dumps(judge.payloads) and "1340" not in json.dumps(judge.payloads)
+        def payload_leaves(value):
+            if isinstance(value, dict):
+                for item in (*value.keys(), *value.values()):
+                    yield from payload_leaves(item)
+            elif isinstance(value, list):
+                for item in value:
+                    yield from payload_leaves(item)
+            else:
+                yield value
+
+        # Hidden literals must not reach the judge. Searching serialized JSON
+        # also matched incidental digits inside measured runtime floats.
+        for value in payload_leaves(judge.payloads):
+            if isinstance(value, str):
+                assert "913" not in value and "1340" not in value
+            else:
+                assert value not in (913, 1340)
         assert all("913" not in r["prompt"] for r in client.requests)
         resumed_client = Analyzer(())
         resumed = run_benchmark(resumed_client, history_store=store, resume=True, **options)
@@ -239,6 +259,10 @@ def test_resume_rejects_changed_evaluation_policy_before_model_calls(tmp_path, m
 def test_javascript_stdio_supports_generated_tests():
     class GeneratedTestsClient(RecordingClient):
         def generate(self, prompt, system=None, temperature=0.2, *, seed=None):
+            if "review generated programming tests" in system.lower():
+                self.requests.append(dict(prompt=prompt, system=system, temperature=temperature, seed=seed))
+                return json.dumps([dict(test_number=1, input_valid=True, output_verified=True,
+                    expected_output='5', category_valid=True, reason='Two plus three equals five.')])
             response = super().generate(prompt, system, temperature, seed=seed)
             if "test cases" in system.lower():
                 return json.dumps([{"input": "2 3", "expected_output": "5", "category": "normal"}])
@@ -248,4 +272,4 @@ def test_javascript_stdio_supports_generated_tests():
     result = run_candidate_refinement_loop(client, "Read two integers and print their sum.", language="javascript")
     assert result.success
     assert result.test_source == "generated"
-    assert result.model_calls == 3  # Analysis, test generation, and the candidate.
+    assert result.model_calls == 4  # Analysis, generation, blind review, and candidate.

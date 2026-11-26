@@ -25,6 +25,9 @@ class RuntimeGrade:
     max_duration_seconds: float
     critical_failure: bool
     failure_evidence: List[dict] = field(default_factory=list)
+    compilation_error_count: int = 0
+    compilation_seconds: float = 0.0
+    execution_environment: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -37,6 +40,7 @@ class ConstraintGrade:
     unverified_constraints: List[str] = field(default_factory=list)
     critical_violation: bool = False
     analysis_error: Optional[str] = None
+    requirement_ledger: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -78,6 +82,7 @@ class EvaluationReport:
     review_reasons: List[EvaluationReason] = field(default_factory=list)
     secondary_score: Optional[float] = None
     judge_error: Optional[str] = None
+    evidence_confidence: Optional[float] = None
 
     @property
     def passed(self) -> bool:

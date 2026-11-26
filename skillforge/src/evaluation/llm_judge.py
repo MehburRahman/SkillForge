@@ -72,6 +72,11 @@ Deterministic evidence is authoritative: never claim that failed trusted tests p
 a timeout/runtime error, and never override a proven constraint violation. Your score is advisory
 and will not determine final correctness by itself.
 
+A critical issue must be concrete: name a specific input (or precise class of inputs) and the wrong
+output or behavior the code produces for it, traced through the actual statements. Doubts you cannot
+trace to such an input belong in feedback, not critical_issues. When every trusted test passes,
+report a critical issue only for a concrete input those tests do not cover; otherwise return [].
+
 Evaluate problem understanding, algorithm suitability, edge-case handling, requirement adherence,
 and code quality. Return ONLY one valid JSON object with exactly these required fields:
 - problem_understanding: number from 0 to 1
@@ -170,6 +175,8 @@ def _parse_judge_grade(raw: str) -> JudgeGrade:
     data = parse_json_response(raw)
     if not isinstance(data, dict):
         raise ValueError("judge response must be a JSON object")
+    if data == json.loads(JUDGE_JSON_TEMPLATE) or data.get("feedback") == "Concise semantic assessment.":
+        raise ValueError("judge copied placeholder feedback; assess the supplied evidence")
 
     required_fields = set(SCORE_FIELDS) | {
         "critical_issues",
@@ -220,6 +227,7 @@ def judge_code(
     language="python",
     execution_mode="stdio",
     entry_point=None,
+    enforce_consistency=True,
 ) -> JudgeGrade:
     """Request an advisory semantic grade with bounded schema retries."""
     language, execution_mode, entry_point = validate_execution(language, execution_mode, entry_point)
@@ -242,8 +250,8 @@ def judge_code(
 {evidence}
 <END_UNTRUSTED_EVALUATION_DATA>
 
-Return exactly one JSON object matching this shape and no other text:
-{JUDGE_JSON_TEMPLATE}"""
+Return one JSON object with the fields described in the system instructions.
+Write a specific assessment grounded in the supplied evidence; do not return placeholder values."""
     last_error = None
     previous_response = ""
     for _ in range(max_attempts):
@@ -255,8 +263,7 @@ Your previous response failed schema validation: {last_error}
 <BEGIN_UNTRUSTED_PREVIOUS_RESPONSE>
 {previous_response[:2000]}
 <END_UNTRUSTED_PREVIOUS_RESPONSE>
-Return the entire corrected JSON object using this exact shape:
-{JUDGE_JSON_TEMPLATE}"""
+Return the entire corrected JSON object with all required fields."""
 
         generate_json = getattr(client, "generate_json", None)
         if callable(generate_json):
@@ -273,7 +280,11 @@ Return the entire corrected JSON object using this exact shape:
                 temperature=temperature,
             )
         try:
-            return _parse_judge_grade(raw)
+            grade = _parse_judge_grade(raw)
+            if (enforce_consistency and grade.likely_failure_category == "NONE" and
+                    (not functional_grade.passed_all or runtime_grade.critical_failure or constraint_grade.critical_violation)):
+                raise ValueError("NONE contradicts the supplied deterministic failure; identify the failure or use UNKNOWN")
+            return grade
         except (TypeError, ValueError) as exc:
             last_error = str(exc)
             previous_response = raw if isinstance(raw, str) else repr(raw)

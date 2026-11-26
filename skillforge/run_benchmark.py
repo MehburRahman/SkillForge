@@ -5,8 +5,10 @@ from src.agents.llm_client import DEFAULT_JUDGE_MODEL, DEFAULT_MODEL, build_clie
 from src.agents.task_spec_cache import DEFAULT_TASK_SPEC_CACHE, TaskSpecCache, add_cache_arguments
 from src.benchmark import DEFAULT_BENCHMARK_PATH, load_benchmark, run_benchmark
 from src.benchmark.runner import select_benchmark_tasks
-from src.experiments import add_experiment_arguments, validate_experiment
+from src.experiments import add_experiment_arguments, validate_experiment, add_reasoning_arguments
 from src.history import DEFAULT_HISTORY_PATH, ExperimentStore
+from src.evolution.prompt_registry import PromptRegistry
+from src.experiments import preflight_execution
 
 
 def print_task(result) -> None:
@@ -40,6 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run only this category; repeat to select multiple categories.",
     )
     parser.add_argument("--prompt-id", help="Registered prompt version to evaluate.")
+    parser.add_argument("--prompt-registry", help="Separate prompt registry for this language/execution workspace.")
     parser.add_argument(
         "--max-attempts",
         type=int,
@@ -60,9 +63,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--judge-model",
         default=None,
         help=(
-            "Ollama model for the advisory judge, which must come from a "
-            "different family than --model so it is not grading its own "
-            f"output. Implies --llm-judge (default when judging: {DEFAULT_JUDGE_MODEL})."
+            "Ollama model for advisory review; same-model opinions are correlated. "
+            f"Implies --llm-judge (default when judging: {DEFAULT_JUDGE_MODEL})."
         ),
     )
     parser.add_argument("--history-db", default=str(DEFAULT_HISTORY_PATH))
@@ -71,6 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resume", action="store_true", help="Resume --run-id with the same experiment settings.")
     add_cache_arguments(parser, default=DEFAULT_TASK_SPEC_CACHE)
     add_experiment_arguments(parser)
+    add_reasoning_arguments(parser)
     return parser
 
 
@@ -86,17 +89,22 @@ def main() -> None:
         if args.no_history and (args.resume or args.run_id is not None):
             raise ValueError("--run-id/--resume require history storage")
         dataset = load_benchmark(args.benchmark)
-        select_benchmark_tasks(dataset, args.split, args.category, args.language)
+        tasks = select_benchmark_tasks(dataset, args.split, args.category, args.language)
+        for task in tasks:
+            preflight_execution(task.language, task.execution_mode)
+        registry_options = {"prompt_registry": PromptRegistry(args.prompt_registry)} if args.prompt_registry else {}
         client, judge_client = build_clients(
             model=args.model,
             judge_model=args.judge_model,
             llm_judge=args.llm_judge,
+            context_window=args.context_window,
         )
         if not args.no_history:
             history_store = ExperimentStore(args.history_db)
         print("Generator model:", client.model)
         print("Judge model:", judge_client.model if judge_client else "disabled")
         print("Configuration:", mode)
+        print("Reasoning mode:", args.reasoning_mode)
         print("Language:", args.language or "from catalog")
         print("Seed:", args.seed if args.seed is not None else "unseeded")
         summary = run_benchmark(
@@ -105,11 +113,13 @@ def main() -> None:
             splits=args.split,
             categories=args.category,
             prompt_id=args.prompt_id,
+            **registry_options,
             max_attempts=args.max_attempts,
             judge_client=judge_client,
             history_store=history_store,
             on_task_complete=print_task,
             config_name=args.config,
+            reasoning_mode=args.reasoning_mode,
             seed=args.seed,
             language=args.language,
             run_id=args.run_id,
@@ -119,7 +129,7 @@ def main() -> None:
             ),
             on_sweep_start=lambda run_id: print("Benchmark run ID:", run_id, flush=True),
         )
-    except ValueError as exc:
+    except (ValueError, RuntimeError, OSError) as exc:
         parser.exit(1, f"\nERROR: {exc}\n")
     finally:
         if history_store is not None:

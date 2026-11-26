@@ -1,4 +1,6 @@
 from dataclasses import asdict, dataclass, replace
+from contextlib import contextmanager
+from functools import wraps
 from datetime import datetime, timezone
 import json
 import os
@@ -9,13 +11,31 @@ from typing import Dict, Iterable, Optional, Tuple
 
 
 SCHEMA_VERSION = 1
-VALID_STATUSES = frozenset({"active", "candidate", "rejected", "archived"})
+VALID_STATUSES = frozenset({"active", "candidate", "rejected", "archived", "rolled_back"})
 PROMPT_ID_PATTERN = re.compile(r"^P(\d+)$")
 DEFAULT_REGISTRY_PATH = Path(__file__).resolve().parents[2] / "data" / "prompts.json"
 
 
 class PromptRegistryError(ValueError):
     """Raised when prompt registry data or an operation is invalid."""
+
+
+class EvolutionBusyError(PromptRegistryError):
+    """Another process owns the registry's evolution lock."""
+
+
+def normalize_prompt(text: str) -> str:
+    """Ignore capitalization and whitespace when detecting repeated proposals."""
+    return " ".join(text.split()).casefold()
+
+
+def _registry_mutation(method):
+    @wraps(method)
+    def locked(self, *args, **kwargs):
+        with self.evolution_lock():
+            self.refresh()
+            return method(self, *args, **kwargs)
+    return locked
 
 
 @dataclass(frozen=True)
@@ -28,6 +48,7 @@ class PromptVersion:
     status: str
     training_metrics: Dict[str, float]
     validation_metrics: Dict[str, float]
+    trigger_decision_id: Optional[str] = None
 
 
 def _metric_map(value, field_name: str) -> Dict[str, float]:
@@ -97,6 +118,7 @@ def _prompt_from_record(record, index: int) -> PromptVersion:
         validation_metrics=_metric_map(
             record.get("validation_metrics"), "validation_metrics"
         ),
+        trigger_decision_id=record.get("trigger_decision_id"),
     )
 
 
@@ -110,7 +132,15 @@ def _validate_versions(versions: Iterable[PromptVersion]) -> Tuple[PromptVersion
         raise PromptRegistryError("prompt registry contains duplicate prompt IDs")
 
     known_ids = set(prompt_ids)
+    trigger_ids = set()
     for version in versions:
+        trigger_id = version.trigger_decision_id
+        if trigger_id is not None:
+            if not isinstance(trigger_id, str) or not trigger_id.strip():
+                raise PromptRegistryError("trigger_decision_id must be a non-empty string or null")
+            if trigger_id in trigger_ids:
+                raise PromptRegistryError("duplicate trigger_decision_id in prompt registry")
+            trigger_ids.add(trigger_id)
         if version.parent_prompt_id is not None:
             if version.parent_prompt_id == version.prompt_id:
                 raise PromptRegistryError(
@@ -138,7 +168,35 @@ class PromptRegistry:
 
     def __init__(self, path):
         self.path = Path(path)
+        self._lock_depth = 0
         self._versions = self._read()
+
+    @contextmanager
+    def evolution_lock(self):
+        """Nonblocking, reentrant process lock; OS releases it on a crash.
+
+        Evolution runs on the project's macOS/Linux host. Ordinary generation
+        only reads the registry and does not need this lock.
+        """
+        if self._lock_depth:
+            self._lock_depth += 1
+            try:
+                yield
+            finally:
+                self._lock_depth -= 1
+            return
+        import fcntl
+        with self.path.with_suffix(self.path.suffix + ".lock").open("a") as handle:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise EvolutionBusyError("another evolution process is using this registry") from exc
+            self._lock_depth = 1
+            try:
+                yield
+            finally:
+                self._lock_depth = 0
+                fcntl.flock(handle, fcntl.LOCK_UN)
 
     def _read(self) -> Tuple[PromptVersion, ...]:
         try:
@@ -208,6 +266,18 @@ class PromptRegistry:
     def versions(self) -> Tuple[PromptVersion, ...]:
         return self._versions
 
+    def refresh(self) -> None:
+        self._versions = self._read()
+
+    def rejected_duplicate(self, prompt_text: str) -> Optional[PromptVersion]:
+        normalized = normalize_prompt(prompt_text)
+        return next((v for v in self._versions
+                     if v.status in {"rejected", "rolled_back"}
+                     and normalize_prompt(v.prompt_text) == normalized), None)
+
+    def candidate_for_trigger(self, decision_id: str) -> Optional[PromptVersion]:
+        return next((v for v in self._versions if v.trigger_decision_id == decision_id), None)
+
     @property
     def active_prompt(self) -> PromptVersion:
         return next(
@@ -227,6 +297,7 @@ class PromptRegistry:
         ]
         return f"P{max(numbers) + 1}"
 
+    @_registry_mutation
     def register_candidate(
         self,
         prompt_text: str,
@@ -235,6 +306,7 @@ class PromptRegistry:
         training_metrics: Optional[Dict[str, float]] = None,
         validation_metrics: Optional[Dict[str, float]] = None,
         created_at: Optional[str] = None,
+        trigger_decision_id: Optional[str] = None,
     ) -> PromptVersion:
         """Persist a candidate without changing the current active prompt."""
         if not isinstance(prompt_text, str) or not prompt_text.strip():
@@ -255,15 +327,17 @@ class PromptRegistry:
             validation_metrics=_metric_map(
                 validation_metrics, "validation_metrics"
             ),
+            trigger_decision_id=trigger_decision_id,
         )
         self._write((*self._versions, candidate))
         return candidate
 
-    def activate(self, prompt_id: str) -> PromptVersion:
+    @_registry_mutation
+    def activate(self, prompt_id: str, *, validation_metrics=None) -> PromptVersion:
         """Manually activate a candidate or archived prompt version."""
         target = self.get(prompt_id)
-        if target.status == "rejected":
-            raise PromptRegistryError("a rejected prompt cannot be activated")
+        if target.status in {"rejected", "rolled_back"}:
+            raise PromptRegistryError(f"a {target.status} prompt cannot be activated")
         if target.status == "active":
             return target
 
@@ -272,28 +346,51 @@ class PromptRegistry:
             if version.status == "active":
                 updated.append(replace(version, status="archived"))
             elif version.prompt_id == prompt_id:
-                updated.append(replace(version, status="active"))
+                updated.append(replace(version, status="active", validation_metrics=(
+                    version.validation_metrics if validation_metrics is None else
+                    _metric_map(validation_metrics, "validation_metrics"))))
             else:
                 updated.append(version)
         self._write(updated)
         return self.get(prompt_id)
 
-    def reject(self, prompt_id: str) -> PromptVersion:
+    @_registry_mutation
+    def reject(self, prompt_id: str, *, validation_metrics=None) -> PromptVersion:
         """Mark a non-active prompt as rejected."""
         target = self.get(prompt_id)
         if target.status == "active":
             raise PromptRegistryError("the active prompt cannot be rejected")
+        if target.status == "rolled_back":
+            raise PromptRegistryError("cannot overwrite a rolled_back outcome")
         if target.status == "rejected":
             return target
 
         updated = [
-            replace(version, status="rejected")
+            replace(version, status="rejected", validation_metrics=(
+                version.validation_metrics if validation_metrics is None else
+                _metric_map(validation_metrics, "validation_metrics")))
             if version.prompt_id == prompt_id
             else version
             for version in self._versions
         ]
         self._write(updated)
         return self.get(prompt_id)
+
+    @_registry_mutation
+    def rollback(self, prompt_id: str) -> PromptVersion:
+        """Restore the direct parent and mark the child in one atomic write."""
+        child = self.get(prompt_id)
+        if child.status != "active" or child.parent_prompt_id is None:
+            raise PromptRegistryError("rollback requires an active child prompt")
+        parent = self.get(child.parent_prompt_id)
+        if parent.status != "archived":
+            raise PromptRegistryError("rollback parent must be archived")
+        self._write(
+            replace(v, status="rolled_back") if v.prompt_id == child.prompt_id else
+            replace(v, status="active") if v.prompt_id == parent.prompt_id else v
+            for v in self._versions
+        )
+        return self.get(parent.prompt_id)
 
 
 def load_default_registry() -> PromptRegistry:
